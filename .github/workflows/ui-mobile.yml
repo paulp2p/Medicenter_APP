@@ -81,23 +81,29 @@ jobs:
           api-level: 30
           arch: x86_64
           target: google_apis
-          # profile: pixel_5    # lo dejamos fuera por ahora
           force-avd-creation: true
           disable-animations: true
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -no-metrics"
           script: |
-            # 1) Levantar Appium y esperar puerto 4723
+            set -eu
+            # 1) Appium up (máx 90s)
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # 2) Pequeña espera de estabilidad del emu
-            sleep 10
+            # 2) Esperar a que PackageManager responda (evita "Can't find service: package")
+            j=0
+            until adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do
+              # intenta "despertar" PM con 'pm list' y reintenta
+              adb -s emulator-5554 shell pm list packages >/dev/null 2>&1 || true
+              j=$((j+1)); [ $j -ge 180 ] && { echo "Timeout esperando PackageManager"; exit 1; }
+              sleep 1
+            done
 
-            # 3) Ejecutar tests (sin checks extra)
-            mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+      # 3) Ejecutar tests
+      mkdir -p allure-results
+      behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
       # --- Artefactos ---
       - name: Upload allure-results
