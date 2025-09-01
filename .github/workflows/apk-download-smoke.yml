@@ -1,0 +1,53 @@
+name: APK download smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Download APK from Drive (rclone + SA, path)
+        env:
+          # Remoto "gdrive" 100% por variables de entorno
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/apk"
+          # Copia la APK desde la carpeta raíz indicada por ROOT_FOLDER_ID
+          rclone copy "gdrive:${GDRIVE_FILE_PATH}" "$RUNNER_TEMP/apk" --progress
+          APK="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
+          test -f "$APK" || (echo "APK no encontrada" && exit 1)
+          echo "APP_PATH=$APK" >> "$GITHUB_ENV"
+          ls -lh "$APK"
+          sha256sum "$APK" | tee apk.sha256
+
+      - name: Save hash and metadata
+        if: always()
+        run: |
+          echo "File: $(basename "${{ env.APP_PATH }}")" > apk_info.txt
+          echo "Path: ${{ env.APP_PATH }}" >> apk_info.txt
+          echo "Size (bytes): $(stat -c%s "${{ env.APP_PATH }}")" >> apk_info.txt
+          cat apk.sha256 >> apk_info.txt
+
+      - name: Upload proof (hash + info)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-proof
+          path: |
+            apk.sha256
+            apk_info.txt
