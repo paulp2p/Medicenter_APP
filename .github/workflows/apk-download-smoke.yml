@@ -16,9 +16,28 @@ jobs:
         run: |
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
-      - name: Download APK from Drive (rclone + SA, path)
+      # --- Debug: listar lo que ve rclone desde el ROOT_FOLDER_ID ---
+      - name: Debug Drive root (lsf)
         env:
-          # Remoto "gdrive" 100% por variables de entorno
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+        run: |
+          set -euo pipefail
+          echo "Listando raíz (gdrive:)"
+          rclone lsf "gdrive:" --dirs-only || true
+          echo "------"
+          SUBDIR="$(dirname "${GDRIVE_FILE_PATH}")"
+          if [ "$SUBDIR" != "." ]; then
+            echo "Listando subcarpeta gdrive:$SUBDIR"
+            rclone lsf "gdrive:$SUBDIR" || true
+          fi
+
+      # --- Descarga estricta: falla si el archivo no existe ---
+      - name: Download APK from Drive (rclone + SA, path, strict)
+        env:
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
@@ -27,21 +46,33 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/apk"
-          # Copia la APK desde la carpeta raíz indicada por ROOT_FOLDER_ID
-          rclone copy "gdrive:${GDRIVE_FILE_PATH}" "$RUNNER_TEMP/apk" --progress
-          APK="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
-          test -f "$APK" || (echo "APK no encontrada" && exit 1)
-          echo "APP_PATH=$APK" >> "$GITHUB_ENV"
-          ls -lh "$APK"
-          sha256sum "$APK" | tee apk.sha256
+          SRC="gdrive:${GDRIVE_FILE_PATH}"
+          DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
+          echo "Copiando: $SRC -> $DEST"
+          # copyto trata SRC como archivo exacto (falla si no existe)
+          rclone copyto "$SRC" "$DEST" -P
+          test -f "$DEST"
+          echo "APP_PATH=$DEST" >> "$GITHUB_ENV"
+          ls -lh "$DEST"
+          sha256sum "$DEST" | tee apk.sha256
 
-      - name: Save hash and metadata
+      - name: Save hash and metadata (robusto)
         if: always()
         run: |
-          echo "File: $(basename "${{ env.APP_PATH }}")" > apk_info.txt
-          echo "Path: ${{ env.APP_PATH }}" >> apk_info.txt
-          echo "Size (bytes): $(stat -c%s "${{ env.APP_PATH }}")" >> apk_info.txt
-          cat apk.sha256 >> apk_info.txt
+          set -euo pipefail
+          : > apk_info.txt
+          if [ -n "${APP_PATH:-}" ] && [ -f "${APP_PATH:-}" ]; then
+            echo "File: $(basename "${APP_PATH}")" >> apk_info.txt
+            echo "Path: ${APP_PATH}" >> apk_info.txt
+            echo "Size (bytes): $(stat -c%s "${APP_PATH}")" >> apk_info.txt
+            # si no existe apk.sha256 por alguna razón, créalo vacío
+            [ -f apk.sha256 ] || sha256sum "${APP_PATH}" | tee apk.sha256
+            cat apk.sha256 >> apk_info.txt
+          else
+            echo "APP_PATH no disponible (descarga fallida o ruta incorrecta)." >> apk_info.txt
+            echo "NO_HASH" > apk.sha256
+          fi
+          cat apk_info.txt
 
       - name: Upload proof (hash + info)
         if: always()
