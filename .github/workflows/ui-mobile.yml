@@ -41,9 +41,10 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt
 
-      - name: Install Appium 2 + Android driver
+      - name: Install Appium 3 + Android driver
         run: |
-          npm install -g appium@2
+          npm i -g appium@next
+          appium -v
           appium driver install uiautomator2
 
       # --- Descarga privada de la APK desde Drive (Service Account + ruta) ---
