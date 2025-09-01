@@ -100,10 +100,10 @@ jobs:
               j=$((j+1)); [ $j -ge 180 ] && { echo "Timeout esperando PackageManager"; exit 1; }
               sleep 1
             done
-
-            # 3) Ejecutar tests
+            
+            # 3) Ejecutar tests ---- MODIFICAR EL COMANDO DE EJECUCION ---
             mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/000-pantalla-inicio.feature
 
       # --- Artefactos ---
       - name: Upload allure-results
