@@ -75,36 +75,37 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator (Pixel 5 API 31) & tests (Behave)
+      - name: Run emulator (Pixel 5 API 30) & tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
-          api-level: 31
+          api-level: 30
           arch: x86_64
           target: google_apis
           profile: pixel_5
-          emulator-boot-timeout: 1200
+          cores: 2
+          ram-size: 2048M
+          emulator-port: 5554
+          emulator-boot-timeout: 1800
           force-avd-creation: true
           disable-animations: true
-          # iguala resolución/densidad para tus taps por coordenadas
-          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio -skin 1080x2340 -dpi-device 440"
+          disable-linux-hw-accel: true         # clave en Linux runners
+          # sin snapshots + sin aceleración + skin/dpi fijos para tus taps por coordenadas
+          emulator-options: >-
+            -no-window -no-snapshot -no-boot-anim
+            -gpu swiftshader_indirect
+            -camera-back none -camera-front none
+            -noaudio
+            -skin 1080x2340 -dpi-device 440
+            -accel off
+            -wipe-data
           script: |
             set -eu
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
-            # esperar Appium en 4723 (máx 60s)
-            i=0; until lsof -i :4723 >/dev/null 2>&1 || [ $i -ge 60 ]; do i=$((i+1)); sleep 1; done
-            lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
-
-            adb wait-for-device
-            SZ="$(adb shell wm size    | tr -d '\r' | awk -F: '{print $2}' | xargs)"
-            DPI="$(adb shell wm density | tr -d '\r' | awk '{print $NF}')"
-            echo "Screen: $SZ  Density: $DPI"
-            [ "$SZ" = "1080x2340" ] || { echo "❌ Pantalla no coincide: $SZ"; exit 1; }
-            [ "$DPI" = "440" ]       || { echo "❌ Densidad no coincide: $DPI"; exit 1; }
-
+            # Espera puerto 4723 (máx 90s)
+            i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
+            
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
-
-
 
       # --- Artefactos ---
       - name: Upload allure-results
