@@ -75,24 +75,33 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator & tests (Behave)
+      - name: Run emulator (Pixel 4a API 30) & tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: 30
           arch: x86_64
           target: google_apis
-          profile: Pixel_6
-          emulator-boot-timeout: 1200
+          device: pixel_4a
+          emulator-boot-timeout: 1700
           force-avd-creation: true
           disable-animations: true
-          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio"
+          # iguala resol/dpi del emu local
+          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio -skin 1080x2340 -dpi-device 440"
           script: |
             set -euo pipefail
             appium --log-level $APPIUM_LOG_LEVEL > appium.log 2>&1 &
-            # espera corta a que Appium quede up (máx ~30s)
             for i in {1..30}; do lsof -i :4723 && break || sleep 1; done
+
+            adb wait-for-device
+            SZ="$(adb shell wm size    | tr -d '\r' | awk -F: '{print $2}' | xargs)"
+            DPI="$(adb shell wm density | tr -d '\r' | awk '{print $NF}')"
+            echo "Screen: $SZ  Density: $DPI"
+            [ "$SZ" = "1080x2340" ] || { echo "❌ Pantalla no coincide: $SZ"; exit 1; }
+            [ "$DPI" = "440" ]       || { echo "❌ Densidad no coincide: $DPI"; exit 1; }
+
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
 
       # --- Artefactos ---
       - name: Upload allure-results
