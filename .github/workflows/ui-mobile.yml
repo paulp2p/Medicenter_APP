@@ -1,14 +1,19 @@
-name: Android UI (Windows)
+name: Android UI (Appium)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
+  pull_request:
 
 jobs:
-  ui-tests-win:
-    runs-on: windows-latest
-    timeout-minutes: 90
+  ui-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     env:
       PYTHONUNBUFFERED: "1"
+      # Appium log level opcional: info | debug | warn | error
       APPIUM_LOG_LEVEL: "info"
 
     steps:
@@ -32,115 +37,76 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
-        shell: pwsh
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
 
       - name: Install Appium 3 + Android driver
-        shell: pwsh
         run: |
           npm i -g appium@next
           appium -v
           appium driver install uiautomator2
 
-      - name: Install rclone (Windows)
-        shell: pwsh
-        run: choco install rclone -y --no-progress
+      # --- Descarga privada de la APK desde Drive (Service Account + ruta) ---
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: Download APK from Drive (rclone + SA, path)
-        shell: pwsh
         env:
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          # Como tu ROOT es la carpeta "CI", tu FILE_PATH es solo el nombre del archivo
           RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}   # ej: medicenter_app.apk
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
         run: |
-          $destDir = Join-Path $env:RUNNER_TEMP "apk"
-          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-          $dest = Join-Path $destDir (Split-Path $env:GDRIVE_FILE_PATH -Leaf)
-          rclone copyto "gdrive:$env:GDRIVE_FILE_PATH" "$dest" -P
-          "APP_PATH=$dest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Get-Item $dest | Format-List Name,Length,FullName
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/apk"
+          SRC="gdrive:${GDRIVE_FILE_PATH}"
+          DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
+          echo "Copiando: $SRC -> $DEST"
+          rclone copyto "$SRC" "$DEST" -P
+          test -f "$DEST"
+          echo "APP_PATH=$DEST" >> $GITHUB_ENV
+          ls -lh "$DEST"
 
-      # ===== ANDROID SDK + AVD (Windows) =====
-      - name: Setup Android cmdline-tools
-        uses: android-actions/setup-android@v3
+      - name: Ensure lsof
+        run: sudo apt-get update && sudo apt-get install -y lsof
 
-      - name: Install SDK packages (api 30 + emulator + system image)
-        shell: pwsh
-        run: |
-          $Env:ANDROID_SDK_ROOT = $Env:ANDROID_HOME  # este action exporta ANDROID_HOME
-          $sdkman = Join-Path $Env:ANDROID_HOME "cmdline-tools\latest\bin\sdkmanager.bat"
-          & $sdkman --version
-          echo "y" | & $sdkman --licenses
-          & $sdkman "platform-tools" "platforms;android-30" "emulator" "system-images;android-30;google_apis;x86_64"
+      # --- Emulador + ejecución de tests ---
+      - name: Run emulator (Pixel 5 API 31) & tests (Behave)
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 31
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          emulator-boot-timeout: 1200
+          force-avd-creation: true
+          disable-animations: true
+          # iguala resolución/densidad para tus taps por coordenadas
+          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio -skin 1080x2340 -dpi-device 440"
+          script: |
+            set -eu
+            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            # esperar Appium en 4723 (máx 60s)
+            i=0; until lsof -i :4723 >/dev/null 2>&1 || [ $i -ge 60 ]; do i=$((i+1)); sleep 1; done
+            lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
 
-      - name: Create AVD (Pixel 5 API 30)
-        shell: pwsh
-        run: |
-          $Env:ANDROID_SDK_ROOT = $Env:ANDROID_HOME
-          $avdman = Join-Path $Env:ANDROID_HOME "cmdline-tools\latest\bin\avdmanager.bat"
-          $name = "ci_pixel5_api30"
-          # -f para forzar recreación si ya existe
-          echo "no" | & $avdman create avd -n $name -k "system-images;android-30;google_apis;x86_64" -d "pixel_5" -f
+            adb wait-for-device
+            SZ="$(adb shell wm size    | tr -d '\r' | awk -F: '{print $2}' | xargs)"
+            DPI="$(adb shell wm density | tr -d '\r' | awk '{print $NF}')"
+            echo "Screen: $SZ  Density: $DPI"
+            [ "$SZ" = "1080x2340" ] || { echo "❌ Pantalla no coincide: $SZ"; exit 1; }
+            [ "$DPI" = "440" ]       || { echo "❌ Densidad no coincide: $DPI"; exit 1; }
 
-      - name: Boot emulator (headless / no-accel) + run tests
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $Env:ANDROID_SDK_ROOT = $Env:ANDROID_HOME
-          $emu = Join-Path $Env:ANDROID_HOME "emulator\emulator.exe"
-          $adb = Join-Path $Env:ANDROID_HOME "platform-tools\adb.exe"
-          $avdName = "ci_pixel5_api30"
+            mkdir -p allure-results
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
-          # Lanzar emulador sin aceleración (WHPX/Hyper-V no disponible en runners)
-          $args = @(
-            "-avd", $avdName,
-            "-no-window", "-no-snapshot", "-no-boot-anim",
-            "-gpu", "swiftshader_indirect",
-            "-noaudio",
-            "-skin", "1080x2340",
-            "-dpi-device", "440",
-            "-ports", "5554,5555",
-            "-no-accel"
-          )
-          Start-Process -FilePath $emu -ArgumentList $args -NoNewWindow
 
-          # Esperar boot (hasta 15 min en Windows/no-accel)
-          $max = 900; $i = 0
-          while ($i -lt $max) {
-            $out = & $adb -s emulator-5554 shell getprop sys.boot_completed 2>$null
-            if ($out -match "1") { break }
-            Start-Sleep -Seconds 1; $i++
-          }
-          if ($i -ge $max) { throw "Timeout esperando boot del emulador" }
 
-          # Verificar tamaño/densidad
-          $sz  = (& $adb shell wm size    | Out-String).Trim().Split(":")[1].Trim()
-          $dpi = (& $adb shell wm density | Out-String).Trim().Split()[-1]
-          Write-Host "Screen: $sz  Density: $dpi"
-          if ($sz -ne "1080x2340") { throw "Pantalla no coincide: $sz" }
-          if ($dpi -ne "440")      { throw "Densidad no coincide: $dpi" }
-
-          # Levantar Appium en background
-          Start-Process -FilePath "appium" -ArgumentList "--log-level","${env:APPIUM_LOG_LEVEL}" -RedirectStandardOutput "appium.log" -RedirectStandardError "appium.log"
-          # Esperar puerto 4723
-          $t=0; while (-not (Get-NetTCPConnection -LocalPort 4723 -ErrorAction SilentlyContinue)) {
-            Start-Sleep -Seconds 1; $t++; if ($t -gt 60) { throw "Appium no inició" }
-          }
-
-          # Ejecutar tests
-          New-Item -ItemType Directory -Force -Path "allure-results" | Out-Null
-          python -m behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
-
-        finally:
-          # siempre intentar apagar el emulador
-          $adb = Join-Path $Env:ANDROID_HOME "platform-tools\adb.exe"
-          & $adb -s emulator-5554 emu kill 2>$null | Out-Null
-
-      # ===== Artefactos =====
+      # --- Artefactos ---
       - name: Upload allure-results
         if: always()
         uses: actions/upload-artifact@v4
@@ -148,7 +114,7 @@ jobs:
           name: allure-results
           path: allure-results
 
-      - name: Upload logs
+      - name: Upload run artifacts (logs + screenshots)
         if: always()
         uses: actions/upload-artifact@v4
         with:
