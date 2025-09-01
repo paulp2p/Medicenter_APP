@@ -75,17 +75,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator (Pixel 4a API 30) & tests (Behave)
+      - name: Run emulator (Pixel 5 API 31) & tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          api-level: 31
           arch: x86_64
           target: google_apis
-          device: pixel_4a
-          emulator-boot-timeout: 1700
+          profile: pixel_5                 # <- usar profile, NO 'device'
+          emulator-boot-timeout: 1200
           force-avd-creation: true
           disable-animations: true
-          # iguala resol/dpi del emu local
+          # igualamos resolución y densidad
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio -skin 1080x2340 -dpi-device 440"
           script: |
             set -euo pipefail
