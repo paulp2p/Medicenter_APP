@@ -26,6 +26,12 @@ def create_driver(config):
     options.set_capability("appium:disableWindowAnimation", True)
     options.set_capability("appium:appWaitActivity", config.get("APP_WAIT_ACTIVITY", "*"))
 
+    # ==== FIX CI: evitar init de device + tolerar latencias ADB/UIA2 ====
+    options.set_capability("appium:skipDeviceInitialization", True)
+    options.set_capability("appium:ignoreHiddenApiPolicyError", True)
+    options.set_capability("appium:adbExecTimeout", 120000)                # 120s
+    options.set_capability("appium:uiautomator2ServerInstallTimeout", 120000)
+
     # UDID opcional (emulador/dispositivo físico)
     udid = config.get("UDID") or os.getenv("UDID")
     if udid:
