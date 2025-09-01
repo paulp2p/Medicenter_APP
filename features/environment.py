@@ -87,19 +87,30 @@ def before_all(context):
         context.api_base_url = context.configs.get("API_BASE_URL")
         print(f"[INFO] Entorno de pruebas: {env}")
 
+        # === CI/Local toggles ===
         context.close_after_scenario = str(context.configs.get("CLOSE_AFTER_SCENARIO", "true")).lower() == "true"
         context.clean_start = str(context.configs.get("CLEAN_START", "true")).lower() == "true"
 
+        # === Infra auxiliares ===
         context.mock_sms_base_url = str(context.configs.get("MOCK_SMS_BASE_URL", os.getenv("MOCK_SMS_BASE_URL", "http://127.0.0.1:8081")))
         context.phone_old = str(context.configs.get("STAGING_PHONE_OLD", os.getenv("STAGING_PHONE_OLD", "+5491100000001")))
         context.phone_new = str(context.configs.get("STAGING_PHONE_NEW", os.getenv("STAGING_PHONE_NEW", "+5491100000002")))
         context.phone_local_no_cc = str(context.configs.get("STAGING_PHONE_LOCAL", os.getenv("STAGING_PHONE_LOCAL", "91100000001")))
-
         context.mail_tm_timeout = int(str(context.configs.get("MAIL_TM_TIMEOUT", os.getenv("MAIL_TM_TIMEOUT", "60"))))
 
         print(f"[INFO] Mock SMS URL: {context.mock_sms_base_url}")
         print(f"[INFO] Phones (old→new): {context.phone_old} → {context.phone_new}")
         print(f"[INFO] Phone local (sin +54): {context.phone_local_no_cc}")
+
+        # === SOPORTE CI: APP_PATH inyectado por GitHub Actions ===
+        app_path = os.getenv("APP_PATH", "").strip()
+        if app_path and os.path.exists(app_path):
+            # guardamos en configs para que driver_factory lo consuma
+            context.configs["APP_PATH"] = app_path
+            print(f"[INFO] APP_PATH recibido (CI): {app_path}")
+        else:
+            # Sin APP_PATH, se usará appPackage/appActivity desde configs
+            print("[INFO] APP_PATH no definido o archivo no existe. Se usará appPackage/appActivity.")
 
     except Exception as e:
         print(f"[ERROR] Error en before_all: {e}")
@@ -109,18 +120,26 @@ def before_all(context):
 def before_scenario(context, scenario):
     print(f"\n=== [SETUP ESCENARIO] {scenario.name} ===")
     try:
+        # crea el driver; driver_factory debe respetar configs["APP_PATH"] si está presente
         context.driver = create_driver(context.configs)
         _set_implicit_wait(context.driver, 1.0)
 
         app_package = context.configs.get("APP_PACKAGE")
-        if context.clean_start:
-            estado = context.driver.query_app_state(app_package)
-            if estado in (3, 4):
-                print("[INFO] Clean start habilitado y app corriendo -> cerrar suave antes de iniciar.")
-                cerrar_app_suave(context.driver, app_package, extra_log=" (pre)")
 
+        # Si pediste clean start y la app ya corre, la cerramos
+        if context.clean_start:
+            try:
+                estado = context.driver.query_app_state(app_package)
+                if estado in (3, 4):
+                    print("[INFO] Clean start habilitado y app corriendo -> cerrar suave antes de iniciar.")
+                    cerrar_app_suave(context.driver, app_package, extra_log=" (pre)")
+            except Exception:
+                pass
+
+        # Si la sesión no quedó en FOREGROUND, forzamos activar y esperamos
         activar_y_esperar(context.driver, app_package)
 
+        # Servicios auxiliares
         context.mock_sms = MockSMSClient(context.mock_sms_base_url)
         try:
             health = context.mock_sms.health()
@@ -130,6 +149,7 @@ def before_scenario(context, scenario):
 
         context.mail_client = MailTmClient(timeout=context.mail_tm_timeout)
 
+        # Page Objects
         context.login_page = LoginPage(context.driver)
         context.registro_page = RegistroPage(context.driver, context.mail_client)
         context.historia_clinica_page = Historia_clinica(context.driver, context.mail_client)
