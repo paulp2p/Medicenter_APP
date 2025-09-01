@@ -81,16 +81,18 @@ jobs:
           api-level: 31
           arch: x86_64
           target: google_apis
-          profile: pixel_5                 # <- usar profile, NO 'device'
+          profile: pixel_5
           emulator-boot-timeout: 1200
           force-avd-creation: true
           disable-animations: true
-          # igualamos resolución y densidad
+          # iguala resolución/densidad para tus taps por coordenadas
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio -skin 1080x2340 -dpi-device 440"
           script: |
-            set -euo pipefail
-            appium --log-level $APPIUM_LOG_LEVEL > appium.log 2>&1 &
-            for i in {1..30}; do lsof -i :4723 && break || sleep 1; done
+            set -eu
+            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            # esperar Appium en 4723 (máx 60s)
+            i=0; until lsof -i :4723 >/dev/null 2>&1 || [ $i -ge 60 ]; do i=$((i+1)); sleep 1; done
+            lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
 
             adb wait-for-device
             SZ="$(adb shell wm size    | tr -d '\r' | awk -F: '{print $2}' | xargs)"
@@ -101,6 +103,7 @@ jobs:
 
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
 
 
       # --- Artefactos ---
