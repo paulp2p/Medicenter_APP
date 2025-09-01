@@ -75,35 +75,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator (Pixel 5 API 30) & tests (Behave)
+      - name: Run emulator (mínimo) + tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
           api-level: 30
           arch: x86_64
           target: google_apis
-          profile: pixel_5
-          cores: 2
-          ram-size: 2048M
-          emulator-port: 5554
-          emulator-boot-timeout: 1800
+          # profile: pixel_5   # dejalo comentado por ahora
           force-avd-creation: true
           disable-animations: true
-          disable-linux-hw-accel: true         # clave en Linux runners
-          # sin snapshots + sin aceleración + skin/dpi fijos para tus taps por coordenadas
-          emulator-options: >-
-            -no-window -no-snapshot -no-boot-anim
-            -gpu swiftshader_indirect
-            -camera-back none -camera-front none
-            -noaudio
-            -skin 1080x2340 -dpi-device 440
-            -accel off
-            -wipe-data
+          disable-linux-hw-accel: true
+          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect"
           script: |
-            set -eu
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
-            # Espera puerto 4723 (máx 90s)
-            i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
-            
+            sleep 25
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
