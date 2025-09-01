@@ -1,0 +1,48 @@
+# Core testing framework
+behave==1.2.6
+allure-behave==2.13.2
+allure-python-commons==2.13.2
+Appium-Python-Client==3.1.1
+selenium==4.12.0
+
+# Helper libraries
+Faker==8.13.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.1.0
+sortedcontainers==2.4.0
+text-unidecode==1.3
+
+# HTTP & networking
+requests==2.32.3
+PySocks==1.7.1
+urllib3==2.5.0
+charset-normalizer==3.4.2
+idna==3.10
+certifi==2025.6.15
+
+# Async and websocket support
+trio==0.30.0
+trio-websocket==0.12.2
+wsproto==1.2.0
+h11==0.16.0
+sniffio==1.3.1
+outcome==1.3.0.post0
+
+# Type parsing and utilities
+attrs==25.3.0
+parse==1.20.2
+parse_type==0.6.4
+pluggy==1.6.0
+
+# CFFI
+cffi==1.17.1
+pycparser==2.22
+six==1.17.0
+
+# ==== Mock service ====
+fastapi==0.115.5
+uvicorn==0.30.6
+pydantic==2.8.2
+
+# flutter_finder no está en PyPI — si lo necesitás:
+# Colocar example/python/flutter_finder.py en support/flutter_finder.py

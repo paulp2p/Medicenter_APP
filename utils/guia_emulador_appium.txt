@@ -1,0 +1,74 @@
+Guía paso a paso para instalar y usar un emulador Android con Appium
+------------------------------------------------------------
+
+Este documento explica cómo configurar un emulador Android optimizado para automatización con Appium. Está pensado para que cualquier persona pueda seguirlo fácilmente.
+
+REQUISITOS PREVIOS:
+- Tener instalado Android SDK.
+- Tener Appium Desktop o Appium CLI instalado.
+- Tener una APK lista para instalar.
+
+1. INSTALAR LAS HERRAMIENTAS DE LÍNEA DE COMANDO DE ANDROID
+------------------------------------------------------------
+1.1 Descargar desde: https://developer.android.com/studio#cmdline-tools
+1.2 Extraer el ZIP y renombrar la carpeta como "latest".
+1.3 Mover la carpeta "latest" dentro de:
+    C:\Users\TU_USUARIO\AppData\Local\Android\Sdk\cmdline-tools\
+
+La ruta final debe ser:
+    C:\Users\TU_USUARIO\AppData\Local\Android\Sdk\cmdline-tools\latest\bin\sdkmanager.bat
+
+2. INSTALAR LA IMAGEN DEL SISTEMA PARA EL EMULADOR
+------------------------------------------------------------
+Ejecutar en PowerShell:
+
+    & "C:\Users\TU_USUARIO\AppData\Local\Android\Sdk\cmdline-tools\latest\bin\sdkmanager.bat" "system-images;android-30;google_apis;x86_64"
+
+3. CREAR EL EMULADOR (AVD)
+------------------------------------------------------------
+Ejecutar en PowerShell:
+
+    & "C:\Users\TU_USUARIO\AppData\Local\Android\Sdk\cmdline-tools\latest\bin\avdmanager.bat" create avd -n medicenter_avd -k "system-images;android-30;google_apis;x86_64" -d "pixel_4a"
+
+4. CREAR EL SCRIPT DE INICIO AUTOMÁTICO
+------------------------------------------------------------
+Guardar el siguiente contenido como iniciar_emulador_appium.bat en la raíz del proyecto:
+
+    @echo off
+    echo Iniciando emulador...
+    start "" "C:\Users\TU_USUARIO\AppData\Local\Android\Sdk\emulator\emulator.exe" -avd medicenter_avd -no-boot-anim -no-snapshot -no-audio -camera-back none -camera-front none -gpu swiftshader_indirect -netfast -accel on
+    timeout /t 20
+    echo Desactivando animaciones...
+    adb shell settings put global window_animation_scale 0
+    adb shell settings put global transition_animation_scale 0
+    adb shell settings put global animator_duration_scale 0
+    echo Instalando APK...
+    adb install -r "C:\Users\TU_USUARIO\SILTIUM\Medicenter_APP\apk\medicenter_app.apk"
+    echo Iniciando Appium...
+    start cmd /k appium
+
+5. USAR EL SCRIPT DESDE VS CODE
+------------------------------------------------------------
+Abrir la terminal interna y ejecutar:
+
+    .\iniciar_emulador_appium.bat
+
+Esto iniciará el emulador, instalará la APK y lanzará Appium.
+
+6. VERIFICAR QUE LA APK ESTÁ INSTALADA
+------------------------------------------------------------
+Ejecutar:
+
+    adb shell pm list packages | findstr "medicenter"
+
+Debe aparecer:
+    package:com.siltium.medicenter
+
+7. OPCIONAL: LANZAR LA APP MANUALMENTE
+------------------------------------------------------------
+Ejecutar:
+
+    adb shell monkey -p com.siltium.medicenter -c android.intent.category.LAUNCHER 1
+
+¡Listo! Ya podés usar Appium Inspector o ejecutar tus tests automatizados.
+
