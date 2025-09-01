@@ -8,7 +8,7 @@ on:
 
 jobs:
   ui-tests:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 60
 
     env:
@@ -71,24 +71,27 @@ jobs:
           echo "APP_PATH=$DEST" >> $GITHUB_ENV
           ls -lh "$DEST"
 
+      - name: Ensure lsof
+        run: sudo apt-get update && sudo apt-get install -y lsof
+
       # --- Emulador + ejecución de tests ---
       - name: Run emulator & tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
-          api-level: 33
+          api-level: 34
           arch: x86_64
           target: google_apis
+          profile: Pixel_6
+          emulator-boot-timeout: 1200
           force-avd-creation: true
           disable-animations: true
-          emulator-options: "-no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim"
+          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none -noaudio"
           script: |
             set -euo pipefail
             appium --log-level $APPIUM_LOG_LEVEL > appium.log 2>&1 &
-            sleep 5
-            lsof -i :4723 || (echo "Appium no inició" && exit 1)
-
+            # espera corta a que Appium quede up (máx ~30s)
+            for i in {1..30}; do lsof -i :4723 && break || sleep 1; done
             mkdir -p allure-results
-            # Ejecuta tus features; si falla, el job marca fallo pero subimos artefactos igual
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
       # --- Artefactos ---
