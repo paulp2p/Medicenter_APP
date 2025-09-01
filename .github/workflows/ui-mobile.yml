@@ -101,9 +101,9 @@ jobs:
               sleep 1
             done
 
-      # 3) Ejecutar tests
-      mkdir -p allure-results
-      behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+            # 3) Ejecutar tests
+            mkdir -p allure-results
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
       # --- Artefactos ---
       - name: Upload allure-results
