@@ -111,8 +111,7 @@ jobs:
 
             # Tests: Allure + HTML single-file en una sola corrida
             mkdir -p allure-results
-            behave -t "not sms" \
-                   -f allure_behave.formatter:AllureFormatter -o allure-results \
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results \
                    -f html -o behave-report.html \
                    ./features
 
