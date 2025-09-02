@@ -75,27 +75,35 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator (mínimo) + tests (Behave)
+      - name: Run emulator (mínimo estable API 29) + tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
-          api-level: 30
-          arch: x86_64
-          target: google_apis
+          api-level: 29
+          arch: x86
+          target: default
+          avd-name: ci_api29_min
           force-avd-creation: true
           disable-animations: true
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
-          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -no-metrics"
+          # nada de profile/skin/puerto: lo más simple posible
+          emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -wipe-data -no-metrics"
+          # pequeño saneo antes de lanzar (evita AVD roto/adb colgado)
+          pre-emulator-launch-script: |
+            adb kill-server || true
+            rm -rf ~/.android/avd/ci_api29_min.avd || true
           script: |
-            set -eu
+            # Appium
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # Esperar a que PackageManager responda (loop en UNA sola línea)
-            i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
+            # Espera de estabilidad corta (sin loops extra)
+            sleep 10
 
+            # Tests
             mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/000-pantalla-inicio.feature
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
 
       # --- Artefactos ---
       - name: Upload allure-results
