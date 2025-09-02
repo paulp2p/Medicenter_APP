@@ -71,24 +71,61 @@ def cerrar_app_suave(driver, app_package: str, extra_log=""):
         if not _has_active_session(driver):
             print("[INFO] cerrar_app_suave: no hay sesión activa, nada que cerrar.")
             return
-        estado = driver.query_app_state(app_package)
+        _ = driver.query_app_state(app_package)
         # (si tenías lógica acá, mantenla)
     except Exception:
         pass
 
-def activar_y_esperar(driver, app_package: str):
-    print("[INFO] Activando app…")
-    try:
-        estado = driver.query_app_state(app_package)
-        if estado != 4:
-            driver.activate_app(app_package)
-    except Exception:
-        # Si falla query_app_state, igual intentamos activar
+def lanzar_app_robusto(driver, app_package: str, app_activity=None, timeout=25):
+    """Deja la app en foreground sí o sí: activate_app -> startActivity -> monkey."""
+    print(f"[INFO] Lanzando {app_package} (robusto)...")
+
+    def en_fg() -> bool:
         try:
-            driver.activate_app(app_package)
+            return (driver.current_package or "") == app_package
         except Exception:
-            pass
-    esperar_inicio_app(driver)
+            return False
+
+    # 1) activate_app
+    try:
+        driver.activate_app(app_package)
+        time.sleep(1.5)
+    except Exception as e:
+        print(f"[WARN] activate_app falló: {e}")
+
+    # 2) startActivity MAIN/LAUNCHER
+    if not en_fg():
+        try:
+            args = {
+                "appPackage": app_package,
+                "intentAction": "android.intent.action.MAIN",
+                "intentCategory": "android.intent.category.LAUNCHER",
+            }
+            if app_activity:
+                args["appActivity"] = app_activity
+            driver.execute_script("mobile: startActivity", args)
+            time.sleep(1.5)
+        except Exception as e:
+            print(f"[WARN] startActivity falló: {e}")
+
+    # 3) monkey fallback
+    if not en_fg():
+        try:
+            driver.execute_script("mobile: shell", {
+                "command": "monkey",
+                "args": ["-p", app_package, "-c", "android.intent.category.LAUNCHER", "1"]
+            })
+            time.sleep(1.5)
+        except Exception as e:
+            print(f"[WARN] monkey falló: {e}")
+
+    try:
+        print(f"[DEBUG] pkg/act: {driver.current_package} / {driver.current_activity}")
+    except Exception:
+        pass
+
+    # Espera de anclas visuales
+    esperar_inicio_app(driver, timeout)
 
 def _is_true(val: str, default=False) -> bool:
     if val is None:
@@ -107,7 +144,7 @@ def before_all(context):
         context.close_after_scenario = _is_true(context.configs.get("CLOSE_AFTER_SCENARIO", "true"), True)
         context.clean_start = _is_true(context.configs.get("CLEAN_START", "true"), True)
 
-        # Datos auxiliares que tus steps podrían usar
+        # Datos auxiliares
         context.phone_old = str(context.configs.get("STAGING_PHONE_OLD", os.getenv("STAGING_PHONE_OLD", "+5491100000001")))
         context.phone_new = str(context.configs.get("STAGING_PHONE_NEW", os.getenv("STAGING_PHONE_NEW", "+5491100000002")))
         context.phone_local_no_cc = str(context.configs.get("STAGING_PHONE_LOCAL", os.getenv("STAGING_PHONE_LOCAL", "91100000001")))
@@ -124,9 +161,6 @@ def before_all(context):
         else:
             print("[INFO] APP_PATH no definido o archivo no existe. Se usará appPackage/appActivity.")
 
-        # Eliminar por completo Mock SMS
-        context.mock_sms = None
-
     except Exception as e:
         print(f"[ERROR] Error en before_all: {e}")
         traceback.print_exc()
@@ -138,7 +172,8 @@ def before_scenario(context, scenario):
         context.driver = create_driver(context.configs)
         _set_implicit_wait(context.driver, 1.0)
 
-        app_package = context.configs.get("APP_PACKAGE")
+        app_package  = context.configs.get("APP_PACKAGE")
+        app_activity = context.configs.get("APP_ACTIVITY", None)
 
         if context.clean_start:
             try:
@@ -149,7 +184,8 @@ def before_scenario(context, scenario):
             except Exception:
                 pass
 
-        activar_y_esperar(context.driver, app_package)
+        # Lanzar forzado
+        lanzar_app_robusto(context.driver, app_package, app_activity)
 
         # Mail y Pages
         context.mail_client = MailTmClient(timeout=context.mail_tm_timeout)
