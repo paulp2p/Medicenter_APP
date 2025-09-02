@@ -30,6 +30,7 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
+          pip install behave-html-formatter
 
       - name: Install Appium 3 + Android driver
         run: |
@@ -82,7 +83,11 @@ jobs:
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
             adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 400 > logcat_install.txt || true; exit 1; }
             mkdir -p allure-results
-            behave -t "not sms" -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+            # Allure + HTML single-file en la misma corrida
+            behave -t "not sms" \
+                   -f allure_behave.formatter:AllureFormatter -o allure-results \
+                   -f html -o behave-report.html \
+                   ./features
 
       - name: Generate Allure HTML
         if: always()
@@ -91,6 +96,8 @@ jobs:
           curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
           unzip -q allure.zip -d $RUNNER_TEMP
           $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report || true
+          # ZIP listo para compartir
+          (cd allure-report && zip -qr ../allure-report.zip .)
 
       - name: Upload artifacts
         if: always()
@@ -102,4 +109,6 @@ jobs:
             logcat_install.txt
             allure-results
             allure-report
+            allure-report.zip
+            behave-report.html
             **/screenshots/**
