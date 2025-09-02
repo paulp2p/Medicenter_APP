@@ -10,12 +10,13 @@ jobs:
   ui-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
     env:
       PYTHONUNBUFFERED: "1"
       # Appium log level opcional: info | debug | warn | error
       APPIUM_LOG_LEVEL: "info"
       DISABLE_MOCK_SMS: "1"
-      CI_FIXED_OTP: "000000"
+      CI_FIXED_OTP: "000000"  
 
     steps:
       - name: Checkout
@@ -41,8 +42,6 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
-          # Para reporte HTML single-file
-          pip install behave-html-formatter
 
       - name: Install Appium 3 + Android driver
         run: |
@@ -89,6 +88,7 @@ jobs:
           disable-animations: true
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
+          emulator-port: 5554                       # <-- fijo para que coincida con -s emulator-5554
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -wipe-data -no-metrics"
           pre-emulator-launch-script: |
             adb kill-server || true
@@ -99,50 +99,20 @@ jobs:
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # Boot completo y PackageManager listo
+            # Boot completo + PackageManager listo (loops en una sola línea)
             i=0; while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
 
-            # Pre-instalar la APK (todo en una sola línea para que no se pierda el rc)
-            if ! adb install -r -g "$APP_PATH"; then
-              echo "adb install FAILED"
-              adb logcat -d | tail -n 1000 > logcat_install.txt || true
-              exit 1
-            fi
+            # Pre-instalar la APK (si falla, corta el job)
+            adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 400 > logcat_install.txt || true; exit 1; }
 
-            # Tests: Allure + HTML single-file en una sola ejecución (sin backslashes)
+            # Tests (excluye @sms)
             mkdir -p allure-results
-            behave -t "not sms" -f allure_behave.formatter:AllureFormatter -o allure-results -f html -o behave-report.html ./features
+            behave -t "not sms" -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
-            # Logcat final para diagnóstico
-            adb logcat -d > logcat.txt 2>/dev/null || true
 
-      # --- Reportes & Artefactos ---
-      - name: Generate Allure HTML
-        if: always()
-        run: |
-          sudo apt-get update && sudo apt-get install -y unzip > /dev/null
-          curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
-          unzip -q allure.zip -d $RUNNER_TEMP
-          $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report || true
-          # ZIP listo para compartir (abre index.html)
-          (cd allure-report && zip -qr ../allure-report.zip .)
-
-      - name: Upload Allure HTML (folder)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: allure-report
-          path: allure-report
-
-      - name: Upload allure-results (raw)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: allure-results
-          path: allure-results
-
-      - name: Upload run artifacts (logs + screenshots + HTML report)
+      # --- Artefactos ---
+      - name: Upload run artifacts (logs + screenshots)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -150,7 +120,37 @@ jobs:
           path: |
             appium.log
             logcat_install.txt
-            logcat.txt
-            behave-report.html
-            allure-report.zip
             **/screenshots/**
+
+      - name: Generate Allure HTML
+        if: always()
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip > /dev/null
+          curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
+          unzip -q allure.zip -d $RUNNER_TEMP
+          $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report || true
+
+      - name: Upload Allure HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report
+
+      - name: Upload allure-results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results
+
+      - name: Upload run artifacts (logs + screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-artifacts
+          path: |
+            appium.log
+            **/screenshots/**
+
+      
