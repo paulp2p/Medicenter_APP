@@ -116,7 +116,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-artifacts
+          name: run-artifacts-${{ github.run_attempt }}
+          overwrite: true                                 
+          if-no-files-found: ignore
           path: |
             appium.log
             logcat_install.txt
