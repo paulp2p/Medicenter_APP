@@ -33,6 +33,11 @@ def create_driver(config):
     options.set_capability("appium:uiautomator2ServerInstallTimeout", 120000)
     options.set_capability("appium:appWaitForLaunch", False)
     options.set_capability("appium:dontStopAppOnReset", True)
+    # más tiempo para instalar APK en emulador sin aceleración
+    options.set_capability("appium:androidInstallTimeout", 300000)  # 5 min
+    # no fuerces reinstall si ya está (evita doble instalación innecesaria)
+    options.set_capability("appium:enforceAppInstall", False)
+
 
     # UDID opcional (emulador/dispositivo físico)
     udid = config.get("UDID") or os.getenv("UDID")

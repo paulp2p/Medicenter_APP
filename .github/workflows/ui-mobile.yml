@@ -107,10 +107,23 @@ jobs:
             # Capturar logcat al salir (pase o falle)
             trap 'adb logcat -d > logcat.txt 2>/dev/null || true' EXIT
 
+            # Esperar que PackageManager esté listo (evita 'Can't find service: package')
+            i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do
+              i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }
+              sleep 1
+            done
+
+            # (Opcional diagnóstico en UNA línea: ABIs de device y APK)
+            AAPT="$ANDROID_SDK_ROOT/build-tools/$(ls -1 "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -n1)/aapt"; \
+            [ -x "$AAPT" ] && { echo "== Device ABI list =="; adb shell getprop ro.product.cpu.abilist; \
+            echo "== APK native-code =="; "$AAPT" dump badging "$APP_PATH" | grep -i native-code || true; } || true
+
+            # Pre-instalar APK (si tarda, lo hace acá, no dentro de Appium)
+            adb install -r -g "$APP_PATH"
+
             # Tests
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/001-login.feature
-
 
       # --- Artefactos ---
 
