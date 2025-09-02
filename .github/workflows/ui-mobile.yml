@@ -75,7 +75,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator (mínimo estable API 29) + tests (Behave)
+      - name: Run emulator (mínimo API 29) + tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
           api-level: 29
@@ -86,42 +86,27 @@ jobs:
           disable-animations: true
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
-          # nada de profile/skin/puerto: lo más simple posible
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -wipe-data -no-metrics"
-          # pequeño saneo antes de lanzar (evita AVD roto/adb colgado)
           pre-emulator-launch-script: |
             adb kill-server || true
             rm -rf ~/.android/avd/ci_api29_min.avd || true
           script: |
+            set -eu
             # Appium
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # --- DIAGNÓSTICO: ABI del device vs ABI de la APK ---
-            echo "== Device ABI =="; adb shell getprop ro.product.cpu.abi || true
-            echo "== Device ABI list =="; adb shell getprop ro.product.cpu.abilist || true
-            AAPT="$ANDROID_SDK_ROOT/build-tools/$(ls -1 $ANDROID_SDK_ROOT/build-tools | sort -V | tail -n1)/aapt"
-            echo "== APK native-code =="; $AAPT dump badging "$APP_PATH" | grep -i native-code || true
-            echo "== APK launchable-activity =="; $AAPT dump badging "$APP_PATH" | grep -i launchable-activity || true
+            # Boot completo y PackageManager listo (loops en UNA línea)
+            i=0; while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done
+            i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
 
-            # Capturar logcat al salir (pase o falle)
-            trap 'adb logcat -d > logcat.txt 2>/dev/null || true' EXIT
-
-            # Esperar que PackageManager esté listo (evita 'Can't find service: package')
-            i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do
-              i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }
-              sleep 1
-            done
-
-            # (Opcional diagnóstico en UNA línea: ABIs de device y APK)
-            AAPT="$ANDROID_SDK_ROOT/build-tools/$(ls -1 "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -n1)/aapt"; \
-            [ -x "$AAPT" ] && { echo "== Device ABI list =="; adb shell getprop ro.product.cpu.abilist; \
-            echo "== APK native-code =="; "$AAPT" dump badging "$APP_PATH" | grep -i native-code || true; } || true
-
-            # Pre-instalar APK (si tarda, lo hace acá, no dentro de Appium)
+            # Pre-instalar la APK (si falla aquí vemos el motivo real al toque)
+            set +e
             adb install -r -g "$APP_PATH"
+            rc=$?; set -e
+            [ $rc -eq 0 ] || { echo "adb install falló (rc=$rc)"; exit $rc; }
 
-            # Tests
+            # Tests (un solo feature para ir rápido)
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/001-login.feature
 
