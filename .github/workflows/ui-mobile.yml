@@ -88,20 +88,12 @@ jobs:
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -no-metrics"
           script: |
             set -eu
-            # 1) Appium up (máx 90s)
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # 2) Esperar a que PackageManager responda (evita "Can't find service: package")
-            j=0
-            until adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do
-              # intenta "despertar" PM con 'pm list' y reintenta
-              adb -s emulator-5554 shell pm list packages >/dev/null 2>&1 || true
-              j=$((j+1)); [ $j -ge 180 ] && { echo "Timeout esperando PackageManager"; exit 1; }
-              sleep 1
-            done
-            
-            # 3) Ejecutar tests ---- MODIFICAR EL COMANDO DE EJECUCION ---
+            # Esperar a que PackageManager responda (loop en UNA sola línea)
+            i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
+
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/000-pantalla-inicio.feature
 
