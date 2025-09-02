@@ -116,14 +116,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-artifacts-${{ github.run_attempt }}
-          overwrite: true                                 
+          name: run-artifacts-${{ github.run_attempt }}   # <- único por reintento
+          overwrite: true                                 # <- pisa si ya existe en el run
           if-no-files-found: ignore
           path: |
             appium.log
             logcat_install.txt
             **/screenshots/**
-
+            
       - name: Generate Allure HTML
         if: always()
         run: |
@@ -145,14 +145,5 @@ jobs:
         with:
           name: allure-results
           path: allure-results
-
-      - name: Upload run artifacts (logs + screenshots)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-artifacts
-          path: |
-            appium.log
-            **/screenshots/**
 
       
