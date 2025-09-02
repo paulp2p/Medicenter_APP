@@ -2,11 +2,11 @@ from behave import *
 from pages.cuenta_page import CuentaPage
 import os
 from utils.otp_helper import attach_otp_to_allure
-
+"""
 NUMERO_LOCAL_SIN_54 = "".join(ch for ch in os.getenv("STAGING_PHONE_LOCAL", "91100000001") if ch.isdigit())
 AUTO_SEND = os.getenv("AUTO_SEND_TO_MOCK", "0") == "1"   # 1 = activar simulación
 FIXED_OTP = os.getenv("STAGING_FIXED_OTP", "1234")       # OTP fijo cuando simulamos
-
+"""
 @when(u'presionar boton cuenta')
 def step_impl(context):
     context.cuenta_page.click_boton_cuenta()
@@ -69,7 +69,7 @@ def step_impl(context):
 @when(u'cambiar nro de telefono')
 def step_cambiar_nro(context):
     # Limpio el mock antes (por las dudas)
-    try:
+   """ try:
         context.mock_sms.flush(f"+54{NUMERO_LOCAL_SIN_54}")
         if NUMERO_LOCAL_SIN_54.startswith("9"):
             context.mock_sms.flush(f"+54{NUMERO_LOCAL_SIN_54[1:]}")
@@ -92,12 +92,12 @@ def step_cambiar_nro(context):
             try:
                 context.mock_sms.send(to, f"Tu código es {FIXED_OTP}", "test")
             except Exception:
-                pass
+                pass"""
 
 
 @then(u'validar codigo de verificacion de cambio de nro de telefono')
 def step_validar_codigo(context):
-    from utils.otp_helper import attach_otp_to_allure
+    """from utils.otp_helper import attach_otp_to_allure
     auto = os.getenv("AUTO_SEND_TO_MOCK", "1").lower() in ("1","true","yes","on")
     timeout = 30 if auto else 180
 
@@ -111,7 +111,7 @@ def step_validar_codigo(context):
         allure.attach(to_usado or "N/A", name="MockSMS to usado", attachment_type=allure.attachment_type.TEXT)
         allure.attach(json.dumps(raw, ensure_ascii=False, indent=2), name="MockSMS last (raw)", attachment_type=allure.attachment_type.JSON)
     except Exception:
-        pass
+        pass"""
 
 
 

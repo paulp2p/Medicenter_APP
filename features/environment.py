@@ -17,25 +17,6 @@ from appium.webdriver.common.appiumby import AppiumBy
 from utils.mailtm_client import MailTmClient
 from behave.model_core import Status
 
-# Import real solo si está habilitado
-try:
-    from services.mock_sms_client import MockSMSClient  # noqa
-except Exception:
-    MockSMSClient = None  # fallback para entornos sin el módulo
-
-
-# ==== Stub para desactivar Mock SMS en CI ====
-class _NullSMSClient:
-    def health(self):
-        return {"status": "disabled"}
-
-    def send_code(self, *args, **kwargs):
-        return {"ok": True}
-
-    def last_code(self, *args, **kwargs):
-        # OTP fijo por si algún step lo consulta por error
-        return {"code": os.getenv("CI_FIXED_OTP", "000000")}
-
 
 def _set_implicit_wait(driver, seconds: float):
     try:
@@ -59,25 +40,31 @@ def esperar_inicio_app(driver, timeout=25):
     fin = time.time() + timeout
     ok = False
     posibles_anchos = [
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().description("Sign in")'),
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Log in")'),
+        # EN
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Sign in")'),
         (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Sign in")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Log in")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Log in")'),
+        # ES
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Iniciar sesión")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Ingresar")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Acceder")'),
     ]
     while time.time() < fin and not ok:
         for by, val in posibles_anchos:
             try:
-                elems = driver.find_elements(by, val)
-                if elems:
+                if driver.find_elements(by, val):
                     ok = True
                     break
             except Exception:
                 pass
         if not ok:
             time.sleep(0.4)
-    if ok:
-        print("[INFO] La app cargó correctamente.")
-    else:
-        print("[WARN] No se encontró ancla de inicio dentro del timeout. Continuamos de todas formas.")
+    try:
+        print(f"[DEBUG] pkg/act: {driver.current_package} / {driver.current_activity}")
+    except Exception:
+        pass
+    print("[INFO] La app cargó correctamente." if ok else "[WARN] Sin ancla visible; continuamos.")
 
 def cerrar_app_suave(driver, app_package: str, extra_log=""):
     try:
@@ -85,15 +72,22 @@ def cerrar_app_suave(driver, app_package: str, extra_log=""):
             print("[INFO] cerrar_app_suave: no hay sesión activa, nada que cerrar.")
             return
         estado = driver.query_app_state(app_package)
-        # ... tu implementación existente
+        # (si tenías lógica acá, mantenla)
     except Exception:
         pass
 
 def activar_y_esperar(driver, app_package: str):
     print("[INFO] Activando app…")
-    estado = driver.query_app_state(app_package)
-    if estado != 4:
-        driver.activate_app(app_package)
+    try:
+        estado = driver.query_app_state(app_package)
+        if estado != 4:
+            driver.activate_app(app_package)
+    except Exception:
+        # Si falla query_app_state, igual intentamos activar
+        try:
+            driver.activate_app(app_package)
+        except Exception:
+            pass
     esperar_inicio_app(driver)
 
 def _is_true(val: str, default=False) -> bool:
@@ -109,22 +103,20 @@ def before_all(context):
         context.api_base_url = context.configs.get("API_BASE_URL")
         print(f"[INFO] Entorno de pruebas: {env}")
 
-        # === CI/Local toggles ===
+        # CI/Local toggles
         context.close_after_scenario = _is_true(context.configs.get("CLOSE_AFTER_SCENARIO", "true"), True)
         context.clean_start = _is_true(context.configs.get("CLEAN_START", "true"), True)
 
-        # === Infra auxiliares ===
-        context.mock_sms_base_url = str(context.configs.get("MOCK_SMS_BASE_URL", os.getenv("MOCK_SMS_BASE_URL", "http://127.0.0.1:8081")))
+        # Datos auxiliares que tus steps podrían usar
         context.phone_old = str(context.configs.get("STAGING_PHONE_OLD", os.getenv("STAGING_PHONE_OLD", "+5491100000001")))
         context.phone_new = str(context.configs.get("STAGING_PHONE_NEW", os.getenv("STAGING_PHONE_NEW", "+5491100000002")))
         context.phone_local_no_cc = str(context.configs.get("STAGING_PHONE_LOCAL", os.getenv("STAGING_PHONE_LOCAL", "91100000001")))
         context.mail_tm_timeout = int(str(context.configs.get("MAIL_TM_TIMEOUT", os.getenv("MAIL_TM_TIMEOUT", "60"))))
 
-        print(f"[INFO] Mock SMS URL: {context.mock_sms_base_url}")
         print(f"[INFO] Phones (old→new): {context.phone_old} → {context.phone_new}")
         print(f"[INFO] Phone local (sin +54): {context.phone_local_no_cc}")
 
-        # === SOPORTE CI: APP_PATH inyectado por GitHub Actions ===
+        # CI: APP_PATH inyectado por workflow
         app_path = os.getenv("APP_PATH", "").strip()
         if app_path and os.path.exists(app_path):
             context.configs["APP_PATH"] = app_path
@@ -132,8 +124,8 @@ def before_all(context):
         else:
             print("[INFO] APP_PATH no definido o archivo no existe. Se usará appPackage/appActivity.")
 
-        # Flag global para desactivar Mock SMS (default: activado solo fuera de CI)
-        context.disable_mock_sms = _is_true(os.getenv("DISABLE_MOCK_SMS", os.getenv("CI", "0")), False)
+        # Eliminar por completo Mock SMS
+        context.mock_sms = None
 
     except Exception as e:
         print(f"[ERROR] Error en before_all: {e}")
@@ -143,7 +135,6 @@ def before_all(context):
 def before_scenario(context, scenario):
     print(f"\n=== [SETUP ESCENARIO] {scenario.name} ===")
     try:
-        # Driver
         context.driver = create_driver(context.configs)
         _set_implicit_wait(context.driver, 1.0)
 
@@ -159,22 +150,6 @@ def before_scenario(context, scenario):
                 pass
 
         activar_y_esperar(context.driver, app_package)
-
-        # === Mock SMS: desactivado si DISABLE_MOCK_SMS=1 o en CI ===
-        if context.disable_mock_sms:
-            context.mock_sms = _NullSMSClient()
-            print("[INFO] Mock SMS deshabilitado (stub activo).")
-        else:
-            if MockSMSClient:
-                context.mock_sms = MockSMSClient(context.mock_sms_base_url)
-                try:
-                    health = context.mock_sms.health()
-                    print(f"[INFO] Mock SMS health: {health}")
-                except Exception as e:
-                    print(f"[WARN] No se pudo contactar el Mock SMS: {e}")
-            else:
-                context.mock_sms = _NullSMSClient()
-                print("[WARN] MockSMSClient no disponible; usando stub.")
 
         # Mail y Pages
         context.mail_client = MailTmClient(timeout=context.mail_tm_timeout)
