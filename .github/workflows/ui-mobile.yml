@@ -117,29 +117,12 @@ jobs:
                    ./features
 
       # --- Reportes & Artefactos ---
-      - name: Generate Allure HTML
-        if: always()
-        run: |
-          sudo apt-get update && sudo apt-get install -y unzip > /dev/null
-          curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
-          unzip -q allure.zip -d $RUNNER_TEMP
-          $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report || true
-          # ZIP listo para compartir (abre index.html)
-          (cd allure-report && zip -qr ../allure-report.zip .)
-
       - name: Upload Allure HTML (folder)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: allure-report
           path: allure-report
-
-      - name: Upload allure-results (raw)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: allure-results
-          path: allure-results
 
       - name: Upload run artifacts (logs + screenshots + HTML reports)
         if: always()
