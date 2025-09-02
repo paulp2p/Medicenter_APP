@@ -97,15 +97,38 @@ jobs:
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # Espera de estabilidad corta (sin loops extra)
-            sleep 10
+            # --- DIAGNÓSTICO: ABI del device vs ABI de la APK ---
+            echo "== Device ABI =="; adb shell getprop ro.product.cpu.abi || true
+            echo "== Device ABI list =="; adb shell getprop ro.product.cpu.abilist || true
+            AAPT="$ANDROID_SDK_ROOT/build-tools/$(ls -1 $ANDROID_SDK_ROOT/build-tools | sort -V | tail -n1)/aapt"
+            echo "== APK native-code =="; $AAPT dump badging "$APP_PATH" | grep -i native-code || true
+            echo "== APK launchable-activity =="; $AAPT dump badging "$APP_PATH" | grep -i launchable-activity || true
+
+            # Capturar logcat al salir (pase o falle)
+            trap 'adb logcat -d > logcat.txt 2>/dev/null || true' EXIT
 
             # Tests
             mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/001-login.feature
 
 
       # --- Artefactos ---
+
+      - name: Generate Allure HTML
+        if: always()
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip > /dev/null
+          curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
+          unzip -q allure.zip -d $RUNNER_TEMP
+          $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report || true
+
+      - name: Upload Allure HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report
+
       - name: Upload allure-results
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,3 +144,5 @@ jobs:
           path: |
             appium.log
             **/screenshots/**
+
+      
