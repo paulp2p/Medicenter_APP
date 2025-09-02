@@ -15,6 +15,8 @@ jobs:
       PYTHONUNBUFFERED: "1"
       # Appium log level opcional: info | debug | warn | error
       APPIUM_LOG_LEVEL: "info"
+      DISABLE_MOCK_SMS: "1"
+      CI_FIXED_OTP: "000000"  
 
     steps:
       - name: Checkout
@@ -86,6 +88,7 @@ jobs:
           disable-animations: true
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
+          emulator-port: 5554                       # <-- fijo para que coincida con -s emulator-5554
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -wipe-data -no-metrics"
           pre-emulator-launch-script: |
             adb kill-server || true
@@ -96,19 +99,20 @@ jobs:
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # Boot completo y PackageManager listo (loops en UNA línea)
+            # Boot completo + PackageManager listo (loops en una sola línea)
             i=0; while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
 
-            # Pre-instalar la APK (si falla aquí vemos el motivo real al toque)
-            set +e
-            adb install -r -g "$APP_PATH"
-            rc=$?; set -e
-            [ $rc -eq 0 ] || { echo "adb install falló (rc=$rc)"; exit $rc; }
+            # Pre-instalar la APK (si falla, cortamos acá)
+            if ! adb install -r -g "$APP_PATH"; then
+              echo "adb install FAILED"
+              exit 1
+            fi
 
-            # Tests (un solo feature para ir rápido)
+            # Tests (excluye @sms)
             mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features/001-login.feature
+            behave -t "not sms" -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
 
       # --- Artefactos ---
 

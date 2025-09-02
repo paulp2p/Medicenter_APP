@@ -1,3 +1,4 @@
+@sms
 Feature: Cuenta 
   Background: Aplicacion abierta
     Given aplicación está abierta
