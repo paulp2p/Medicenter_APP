@@ -101,7 +101,15 @@ jobs:
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
             adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 400 > logcat_install.txt || true; exit 1; }
             mkdir -p allure-results
-            behave -t "not sms" -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
+      - name: Inspect Allure results (debug)
+        if: always()
+        run: |
+          echo "PWD=$(pwd)"
+          test -d allure-results && ls -lah allure-results || echo "allure-results NO existe"
+          echo "Conteo de archivos:"
+          find allure-results -maxdepth 1 -type f | wc -l
 
       - name: Upload artifacts (logs + allure results)
         if: always()
@@ -118,25 +126,30 @@ jobs:
       - name: Generate Allure HTML
         if: always()
         run: |
-          if [ -d "allure-results" ] && [ "$(ls -A allure-results)" ]; then
+          if [ ! -d allure-results ] || [ -z "$(ls -A allure-results)" ]; then
+            echo "No hay resultados en allure-results. Saltando generación."
+            mkdir -p allure-report
+            echo "<h1>Sin resultados</h1>" > allure-report/index.html
+          else
             sudo apt-get update && sudo apt-get install -y unzip > /dev/null
             curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
             unzip -q allure.zip -d $RUNNER_TEMP
-            $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report
-            (cd allure-report && zip -qr ../allure-report.zip .)
-          else
-            echo "No hay allure-results; creo un placeholder."
-            mkdir -p allure-report
-            echo "<html><body><h2>Sin resultados</h2></body></html>" > allure-report/index.html
-            (cd allure-report && zip -qr ../allure-report.zip .)
+            $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report --clean
           fi
 
-      - name: Upload Allure HTML
+      - name: Upload Allure report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: allure-report
-          path: allure-report.zip
-          if-no-files-found: warn
+          path: allure-report
+
+      - name: Upload raw Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results
+
 
        
