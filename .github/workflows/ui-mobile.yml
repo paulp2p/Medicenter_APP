@@ -109,12 +109,8 @@ jobs:
 
             # Tests (excluye @sms)
             mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results -f behave_html_formatter:HTMLFormatter -o behave-report.html ./features
-
+            behave -f behave_html_formatter:HTMLFormatter -o behave-report.html ./features
             
-
-
-
       # --- Artefactos ---
       - name: Upload run artifacts (logs + screenshots)
         if: always()
