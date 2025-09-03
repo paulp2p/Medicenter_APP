@@ -96,20 +96,27 @@ jobs:
             rm -rf ~/.android/avd/ci_api29_min.avd || true
           script: |
             set -eu
-            # Appium
+
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
-
-            # Boot completo + PackageManager listo (loops en una sola línea)
             i=0; while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
 
-            # Pre-instalar la APK (si falla, corta el job)
+            # ← sin backslash
+            AAPT="$ANDROID_SDK_ROOT/build-tools/$(ls -1 "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -n1)/aapt"
+            echo "== AAPT =="
+            "$AAPT" version || true
+            echo "== APK native-code =="
+            "$AAPT" dump badging "$APP_PATH" | grep -i native-code || true
+            echo "== APK launchable-activity =="
+            "$AAPT" dump badging "$APP_PATH" | grep -i launchable-activity || true
+
             adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 400 > logcat_install.txt || true; exit 1; }
 
-            # Tests (excluye @sms)
             mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results -f behave_html_formatter:HTMLFormatter -o behave-report.html ./features
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results \
+                  -f behave_html_formatter:HTMLFormatter -o behave-report.html \
+                  ./features
 
       # --- Artefactos ---
       - name: Upload run artifacts (logs + screenshots)
