@@ -40,9 +40,7 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
-          python -c "import pkgutil,sys; import allure_commons, allure_behave; print('allure-behave:', allure_behave.__version__); print('allure-python-commons:', allure_commons.__version__)"
-
-
+          
       - name: Ensure report formatters
         run: |
           pip show allure-behave >/dev/null 2>&1 || pip install -U allure-behave
