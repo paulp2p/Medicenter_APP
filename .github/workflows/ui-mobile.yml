@@ -78,51 +78,74 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lsof
 
       # --- Emulador + ejecución de tests ---
-      - name: Run emulator (mínimo API 29) + tests (Behave)
+      - name: Run emulator (API 29 google_apis x86) + tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
           api-level: 29
           arch: x86
-          target: default
-          avd-name: ci_api29_min
+          target: google_apis           # <— clave: habilita ARM translation
+          avd-name: ci_api29_gapis_x86
+          emulator-port: 5554
           force-avd-creation: true
           disable-animations: true
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
-          emulator-port: 5554                       # <-- fijo para que coincida con -s emulator-5554
           emulator-options: "-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -accel off -wipe-data -no-metrics"
           pre-emulator-launch-script: |
             adb kill-server || true
-            rm -rf ~/.android/avd/ci_api29_min.avd || true
+            rm -rf ~/.android/avd/ci_api29_gapis_x86.avd || true
           script: |
             set -eu
-            # Appium
+
+            # Iniciar Appium
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
 
-            # Boot completo + PackageManager listo (loops en una sola línea)
+            # Boot + PackageManager listo
             i=0; while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
 
-            # Pre-instalar la APK (si falla, corta el job)
-            adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 400 > logcat_install.txt || true; exit 1; }
+            # (Útil) Mostrar ABIs del APK en el log
+            AAPT="$ANDROID_SDK_ROOT/build-tools/$(ls -1 "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -n1)/aapt"; \
+            echo "== APK native-code =="; "$AAPT" dump badging "$APP_PATH" | grep -i native-code || true
 
-            # Tests (excluye @sms)
-            mkdir -p allure-results
-            behave -f behave_html_formatter:HTMLFormatter -o behave-report.html ./features
+            # Limpiar y configurar logcat
+            adb logcat -c || true
+            adb logcat -G 10M || true
+
+            # Instalar APK
+            if ! adb install -r -g "$APP_PATH"; then
+              echo "adb install FAILED"
+              adb logcat -d | tail -n 400 > "$GITHUB_WORKSPACE/logcat_install.txt" || true
+              exit 1
+            fi
+
+            # Reportes con rutas absolutas (para subir como artefactos)
+            ALLURE_DIR="$GITHUB_WORKSPACE/allure-results"
+            HTML_REPORT="$GITHUB_WORKSPACE/behave-report.html"
+            mkdir -p "$ALLURE_DIR"
+
+            # Ejecutar Behave (Allure + HTML). Asegúrate de tener 'behave-html-formatter' en requirements.txt
+            behave -f allure_behave.formatter:AllureFormatter -o "$ALLURE_DIR" \
+                  -f behave_html_formatter:HTMLFormatter -o "$HTML_REPORT" \
+                  ./features
+
+            # Guardar logcat completo para diagnosticar crash/errores de runtime
+            adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
 
       # --- Artefactos ---
-      - name: Upload run artifacts (logs + screenshots)
+      - name: Upload artifacts (reports + logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-artifacts-${{ github.run_attempt }}
-          overwrite: true
-          if-no-files-found: ignore
+          name: run-artifacts-${{ github.run_number }}
           path: |
             appium.log
             logcat_install.txt
-            behave-report.html
+            logcat.txt
+            ${{ github.workspace }}/behave-report.html
+            ${{ github.workspace }}/allure-results
+            ${{ github.workspace }}/allure-report
             **/screenshots/**
             
       - name: Generate Allure HTML
