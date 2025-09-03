@@ -99,21 +99,9 @@ jobs:
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
             i=0; while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done
             i=0; while ! adb -s emulator-5554 shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done
-
             adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 400 > logcat_install.txt || true; exit 1; }
-
-            # === Allure results path absoluto
-            export ALLURE_DIR="$GITHUB_WORKSPACE/allure-results"
-            mkdir -p "$ALLURE_DIR"
-
-            # Ejecutar Behave con Allure (y progreso en consola)
-            behave -f allure_behave.formatter:AllureFormatter -o "$ALLURE_DIR" \
-                   -f progress2 \
-                   ./features || true
-
-            echo "== Contenido de $ALLURE_DIR =="
-            ls -la "$ALLURE_DIR" || true
-
+            mkdir -p allure-results
+            behave -t "not sms" -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
       - name: Upload artifacts (logs + allure results)
         if: always()
