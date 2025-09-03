@@ -71,6 +71,7 @@ jobs:
       - name: Ensure lsof
         run: sudo apt-get update && sudo apt-get install -y lsof
 
+      # ---- activa y ejecuta emulador + tests ----
       - name: Run emulator (mínimo API 29) + tests (Behave)
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
@@ -108,3 +109,29 @@ jobs:
             allure-results
             **/screenshots/**
           if-no-files-found: warn
+
+      - name: Generate Allure HTML
+        if: always()
+        run: |
+          if [ -d "allure-results" ] && [ "$(ls -A allure-results)" ]; then
+            sudo apt-get update && sudo apt-get install -y unzip > /dev/null
+            curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
+            unzip -q allure.zip -d $RUNNER_TEMP
+            $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report
+            (cd allure-report && zip -qr ../allure-report.zip .)
+          else
+            echo "No hay allure-results; creo un placeholder."
+            mkdir -p allure-report
+            echo "<html><body><h2>Sin resultados</h2></body></html>" > allure-report/index.html
+            (cd allure-report && zip -qr ../allure-report.zip .)
+          fi
+
+      - name: Upload Allure HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report.zip
+          if-no-files-found: warn
+
+       
