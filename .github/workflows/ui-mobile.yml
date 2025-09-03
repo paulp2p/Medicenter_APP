@@ -93,7 +93,7 @@ jobs:
           pre-emulator-launch-script: |
             adb kill-server || true
             rm -rf ~/.android/avd/ci_api29_min.avd || true
-                    script: |
+          script: |
             set -eu
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
             i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done
