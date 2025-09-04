@@ -1,4 +1,4 @@
-name: Android UI (Ubuntu - Optimized)
+name: Android UI (Ubuntu - Simple)
 
 on:
   workflow_dispatch:
@@ -12,32 +12,59 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       APPIUM_LOG_LEVEL: "info"
-      GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-      GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Tools (Java, Node, Python, Appium, ADB)
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools (pip + OS + rclone + Appium)
         run: |
-          # Instalar dependencias de Python
+          set -eu
           python -m pip install -U pip
           pip install -r requirements.txt allure-behave
-
-          # Instalar Appium y drivers
+          sudo apt-get update
+          sudo apt-get install -y lsof unzip zip
+          curl -fsSL https://rclone.org/install.sh | sudo bash
           npm i -g appium@next
           appium -v
           appium driver install uiautomator2
 
-      - name: Download APK from Drive
-        uses: lselden/gh-action-rclone-upload@v1
-        with:
-          rclone_config: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
-          args: copyto gdrive:${{ env.GDRIVE_FILE_PATH }} ${{ runner.temp }}/app.apk
+      - name: Download APK from Drive (rclone + Service Account)
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP"
+          SRC="gdrive:${GDRIVE_FILE_PATH}"
+          DEST="$RUNNER_TEMP/app.apk"
+          echo "Copiando: $SRC -> $DEST"
+          rclone copyto "$SRC" "$DEST" -P
+          test -f "$DEST"
+          echo "APP_PATH=$DEST" >> $GITHUB_ENV
+          ls -lh "$DEST"
 
-      - name: Run Android Emulator and UI Tests
-        uses: reactivecircus/android-emulator-runner@v2
+      - name: Run emulator (API 29, Google APIs) + tests
+        uses: ReactiveCircus/android-emulator-runner@v2
         with:
           api-level: 29
           target: google_apis
@@ -45,37 +72,76 @@ jobs:
           avd-name: ci_api29_googleapis_x86
           force-avd-creation: true
           disable-animations: true
+          disable-linux-hw-accel: true
+          emulator-boot-timeout: 1800
+          # Emulador en inglés + sin snapshots
           emulator-options: >-
             -no-window -no-boot-anim -noaudio -gpu swiftshader_indirect
-            -no-snapshot-save -no-snapshot -wipe-data -no-metrics
+            -no-snapshot -no-snapshot-save -wipe-data -no-metrics
             -prop persist.sys.locale=en-US
+            -prop persist.sys.language=en
+            -prop persist.sys.country=US
           script: |
-            set -euo pipefail
+            set -eu
 
-            # Iniciar Appium en segundo plano
+            # Appium en background (control de PID)
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            APPIUM_PID=$!
 
-            # Esperar a que Appium se inicie
-            timeout 90 lsof -i :4723 || { echo "Appium no se inició a tiempo."; exit 1; }
+            # Espera puerto 4723
+            i=0
+            while ! lsof -i :4723 >/dev/null 2>&1; do
+              i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }
+              sleep 1
+            done
 
-            # Esperar a que el emulador esté listo
-            adb wait-for-device
-            adb shell "while [ -z \"\$(getprop sys.boot_completed)\" ]; do sleep 1; done;"
+            # Esperar boot del emulador
+            i=0
+            while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
+              i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }
+              sleep 1
+            done
 
-            # Instalar APK y ejecutar tests
-            adb install -r -g ${{ runner.temp }}/app.apk
+            # Reforzar locale en-US (inofensivo en API 29)
+            adb shell "cmd locale set en-US" || true
+
+            # Instalar APK
+            adb install -r -g "$APP_PATH" || {
+              echo "adb install FAILED"
+              adb logcat -d | tail -n 800 > logcat_install.txt || true
+              kill -15 "$APPIUM_PID" || true; wait "$APPIUM_PID" || true
+              exit 1
+            }
+
+            # Ejecutar tests → Allure results
+            mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
-      
-      - name: Generate and Publish Allure Report
+
+            # Cierre limpio de Appium para evitar errores de teardown
+            kill -15 "$APPIUM_PID" || true
+            wait "$APPIUM_PID" || true
+
+      - name: Generate Allure HTML + ZIP
         if: always()
-        uses: simple-elf/allure-report-action@v2.0.0
-        with:
-          allure_results: allure-results
-          name: Allure Test Report
-      
-      - name: Upload Logs
+        run: |
+          set -eu
+          if [ -d allure-results ] && [ -n "$(ls -A allure-results || true)" ]; then
+            curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
+            unzip -q allure.zip -d $RUNNER_TEMP
+            $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report --clean
+          else
+            mkdir -p allure-report
+            echo "<h1>Sin resultados</h1>" > allure-report/index.html
+          fi
+          zip -r allure-report.zip allure-report
+
+      - name: Upload Allure ZIP + logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-logs
-          path: appium.log
+          name: run-artifacts
+          path: |
+            allure-report.zip
+            appium.log
+            logcat_install.txt
+          if-no-files-found: warn
