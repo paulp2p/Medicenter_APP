@@ -1,4 +1,4 @@
-name: Android UI (Ubuntu - Simple)
+name: Android UI (Ubuntu - Simple Fixed)
 
 on:
   workflow_dispatch:
@@ -54,10 +54,8 @@ jobs:
           GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
         run: |
           set -eu
-          mkdir -p "$RUNNER_TEMP"
           SRC="gdrive:${GDRIVE_FILE_PATH}"
           DEST="$RUNNER_TEMP/app.apk"
-          echo "Copiando: $SRC -> $DEST"
           rclone copyto "$SRC" "$DEST" -P
           test -f "$DEST"
           echo "APP_PATH=$DEST" >> $GITHUB_ENV
@@ -72,54 +70,24 @@ jobs:
           avd-name: ci_api29_googleapis_x86
           force-avd-creation: true
           disable-animations: true
-          disable-linux-hw-accel: true
+          disable-linux-hw-accel: true           # evita KVM; estable en hosted
           emulator-boot-timeout: 1800
-          # Emulador en inglés + sin snapshots
+          # sin -prop persist.sys.* (solo warnings); seteo idioma vía ADB
           emulator-options: >-
             -no-window -no-boot-anim -noaudio -gpu swiftshader_indirect
             -no-snapshot -no-snapshot-save -wipe-data -no-metrics
-            -prop persist.sys.locale=en-US
-            -prop persist.sys.language=en
-            -prop persist.sys.country=US
-          script: |
-            set -eu
-
-            # Appium en background (control de PID)
-            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
-            APPIUM_PID=$!
-
-            # Espera puerto 4723
-            i=0
-            while ! lsof -i :4723 >/dev/null 2>&1; do
-              i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }
-              sleep 1
-            done
-
-            # Esperar boot del emulador
-            i=0
-            while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
-              i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }
-              sleep 1
-            done
-
-            # Reforzar locale en-US (inofensivo en API 29)
-            adb shell "cmd locale set en-US" || true
-
-            # Instalar APK
-            adb install -r -g "$APP_PATH" || {
-              echo "adb install FAILED"
-              adb logcat -d | tail -n 800 > logcat_install.txt || true
-              kill -15 "$APPIUM_PID" || true; wait "$APPIUM_PID" || true
-              exit 1
-            }
-
-            # Ejecutar tests → Allure results
-            mkdir -p allure-results
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
-
-            # Cierre limpio de Appium para evitar errores de teardown
-            kill -15 "$APPIUM_PID" || true
-            wait "$APPIUM_PID" || true
+          # OJO: el action ejecuta cada línea por separado (/bin/sh).
+          # Por eso todo va en UNA sola línea con ; y &&.
+          script: >-
+            appium --log-level info > appium.log 2>&1 & sleep 2;
+            i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done;
+            adb wait-for-device;
+            i=0; while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done;
+            adb shell "cmd locale set en-US" || true;
+            adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 800 > logcat_install.txt || true; pkill -f appium || true; exit 1; };
+            mkdir -p allure-results;
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features;
+            pkill -f appium || true
 
       - name: Generate Allure HTML + ZIP
         if: always()
@@ -135,7 +103,7 @@ jobs:
           fi
           zip -r allure-report.zip allure-report
 
-      - name: Upload Allure ZIP + logs
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
