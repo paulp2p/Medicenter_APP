@@ -31,11 +31,11 @@ jobs:
           appium driver install uiautomator2
 
       - name: Download APK from Drive
-        uses: rclone/rclone-action@v2.2.0
+        uses: rclone/gh-action@v2
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
-          rclone_args: copyto gdrive:${{ env.GDRIVE_FILE_PATH }} ${{ runner.temp }}/app.apk
-
+          args: copyto gdrive:${{ env.GDRIVE_FILE_PATH }} ${{ runner.temp }}/app.apk
+          
       - name: Run Android Emulator and UI Tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
