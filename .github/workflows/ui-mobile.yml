@@ -65,7 +65,7 @@ jobs:
           echo "APP_PATH=$DEST" >> $GITHUB_ENV
           ls -lh "$DEST"
 
-      - name: Run emulator (API 30) + tests
+      - name: Run emulator (API 30, Google APIs) + tests
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
           api-level: 30
@@ -74,56 +74,65 @@ jobs:
           avd-name: ci_api30_googleapis_x86_64
           force-avd-creation: true
           disable-animations: true
+          # no mates el HW accel salvo que falle; podés quitar esta línea:
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
-          # Idioma en inglés desde el arranque
+          # Reemplaza por opciones SIN snapshot y con locale en-US desde el arranque
           emulator-options: >-
-            -no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect
-            -noaudio -accel off -wipe-data -no-metrics
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -no-snapshot -no-snapshot-save -wipe-data -no-metrics
             -prop persist.sys.locale=en-US
             -prop persist.sys.language=en
             -prop persist.sys.country=US
+          # quitá el kill de adb acá
           pre-emulator-launch-script: |
-            adb kill-server || true
             rm -rf ~/.android/avd/ci_api30_googleapis_x86_64.avd || true
           script: |
             set -euxo pipefail
+            export ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL=5
 
-            # 1) Levantar Appium y esperar puerto
+            # 1) Appium en background con control de PID
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            APPIUM_PID=$!
+
+            # Esperar puerto 4723
             for i in $(seq 1 90); do lsof -i :4723 >/dev/null 2>&1 && break || sleep 1; done
             lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
 
-            # 2) Forzar locale a en-US por si el prop no alcanzó
+            # 2) Forzar locale en-US y per-app (13+)
             adb shell "cmd locale set en-US" || true
-            adb shell getprop persist.sys.locale || true
-
-            # (Opcional Android 13+): idioma por app
             adb shell "cmd activity set-app-language com.siltium.medicenter en-US" || true
 
             # 3) Instalar APK
             adb install -r -g "$APP_PATH" || {
               echo "adb install FAILED"
               adb logcat -d | tail -n 800 > logcat_install.txt || true
+              # cerrar appium antes de salir para no romper el teardown
+              kill -15 "$APPIUM_PID" || true; wait "$APPIUM_PID" || true
               exit 1
             }
 
             # 4) Smoke launch rápido
             adb shell cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.siltium.medicenter || {
               adb shell dumpsys package com.siltium.medicenter > dumpsys_pkg.txt || true
+              kill -15 "$APPIUM_PID" || true; wait "$APPIUM_PID" || true
               exit 1
             }
             adb shell am start -W -n "com.siltium.medicenter/.MainActivity" || true
             sleep 5
             adb shell dumpsys activity activities | grep mResumedActivity | tee resumed.txt || true
             if ! grep -q com.siltium.medicenter resumed.txt; then
-              echo "App no en foreground, guardo logcat…"
               adb logcat -d -v time | tail -n 1500 > logcat_crash_pre_tests.txt || true
             fi
 
-            # 5) Ejecutar tests (Allure)
+            # 5) Tests + Allure
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
+            # 6) Cierre limpio de Appium ANTES de que el action intente matar el emulador
+            kill -15 "$APPIUM_PID" || true
+            wait "$APPIUM_PID" || true
+
 
       - name: Generate Allure HTML
         if: always()
