@@ -1,4 +1,4 @@
-name: Android UI (Appium) - Windows Simple
+name: Android UI (Ubuntu - Simple)
 
 on:
   workflow_dispatch:
@@ -8,15 +8,10 @@ on:
 
 jobs:
   ui-tests:
-    # Recomendado: Windows self-hosted con Hyper-V/WHPX habilitado
-    runs-on: [self-hosted, Windows]
+    runs-on: ubuntu-latest
     env:
       PYTHONUNBUFFERED: "1"
       APPIUM_LOG_LEVEL: "info"
-      APPIUM_LANGUAGE: "en"
-      APPIUM_LOCALE: "US"
-      ANDROID_SDK_ROOT: "C:\\Android\\Sdk"
-      ANDROID_HOME: "C:\\Android\\Sdk"
 
     steps:
       - name: Checkout
@@ -38,23 +33,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install tools (pip + rclone + Appium)
-        shell: pwsh
+      - name: Install tools (pip + OS + rclone + Appium)
         run: |
+          set -euo pipefail
           python -m pip install -U pip
           pip install -r requirements.txt allure-behave
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy Bypass -Scope Process -Force
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex
-          }
-          choco install rclone -y --no-progress
+          sudo apt-get update
+          sudo apt-get install -y lsof unzip zip
+          curl -fsSL https://rclone.org/install.sh | sudo bash
           npm i -g appium@next
           appium -v
           appium driver install uiautomator2
 
-      - name: Download APK from Drive (rclone + Service Account)
-        shell: pwsh
+      - name: Download APK from Drive (rclone + SA)
         env:
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
@@ -62,114 +53,70 @@ jobs:
           RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
           GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
         run: |
-          $apkDir = Join-Path $env:RUNNER_TEMP "apk"
-          New-Item -ItemType Directory -Force -Path $apkDir | Out-Null
-          $src = "gdrive:$env:GDRIVE_FILE_PATH"
-          $dest = Join-Path $apkDir (Split-Path -Leaf $env:GDRIVE_FILE_PATH)
-          Write-Host "Copiando $src -> $dest"
-          rclone copyto $src $dest -P
-          if (!(Test-Path $dest)) { throw "APK no encontrada en $dest" }
-          echo "APP_PATH=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Get-ChildItem $dest | Format-List *
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/apk"
+          SRC="gdrive:${GDRIVE_FILE_PATH}"
+          DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
+          echo "Copiando: $SRC -> $DEST"
+          rclone copyto "$SRC" "$DEST" -P
+          test -f "$DEST"
+          echo "APP_PATH=$DEST" >> $GITHUB_ENV
+          ls -lh "$DEST"
 
-      - name: Install Android SDK + Create AVD (API 29, Google APIs)
-        shell: pwsh
+      - name: Run emulator (API 29, Google APIs) + tests
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: google_apis
+          arch: x86
+          avd-name: ci_api29_googleapis_x86
+          force-avd-creation: true
+          disable-animations: true
+          # Emulador en inglés y sin snapshots
+          emulator-options: >-
+            -no-window -no-boot-anim -noaudio -gpu swiftshader_indirect
+            -no-snapshot -no-snapshot-save -wipe-data -no-metrics
+            -prop persist.sys.locale=en-US
+            -prop persist.sys.language=en
+            -prop persist.sys.country=US
+          script: |
+            set -euo pipefail
+
+            # Appium en background y espera de puerto
+            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            for i in $(seq 1 90); do lsof -i :4723 >/dev/null 2>&1 && break || sleep 1; done
+            lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
+
+            # Esperar boot del emulador y reforzar locale
+            for i in $(seq 1 900); do
+              [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1" ] && break || sleep 1
+            done
+            adb shell "cmd locale set en-US" || true
+            adb shell "cmd activity set-app-language com.siltium.medicenter en-US" || true
+
+            # Instalar APK
+            adb install -r -g "$APP_PATH" || {
+              echo "adb install FAILED"
+              adb logcat -d | tail -n 800 > logcat_install.txt || true
+              exit 1
+            }
+
+            # Ejecutar tests → Allure results
+            mkdir -p allure-results
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
+
+      - name: Generate Allure HTML + ZIP
+        if: always()
         run: |
-          $sdkRoot = $env:ANDROID_SDK_ROOT
-          New-Item -ItemType Directory -Force -Path $sdkRoot | Out-Null
-          $cmdZip = Join-Path $env:TEMP "cmdtools.zip"
-          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/commandlinetools-win-9477386_latest.zip" -OutFile $cmdZip
-          Expand-Archive -Path $cmdZip -DestinationPath (Join-Path $sdkRoot "cmdline-tools") -Force
-          # Reacomodar a ...\cmdline-tools\latest\bin
-          if (Test-Path (Join-Path $sdkRoot "cmdline-tools\cmdline-tools")) {
-            Move-Item (Join-Path $sdkRoot "cmdline-tools\cmdline-tools") (Join-Path $sdkRoot "cmdline-tools\latest") -Force
-          }
-          $env:Path = "$sdkRoot\platform-tools;$sdkRoot\cmdline-tools\latest\bin;$sdkRoot\emulator;$env:Path"
-
-          # Licencias + componentes
-          cmd /c "echo y | `"$sdkRoot\cmdline-tools\latest\bin\sdkmanager.bat`" --licenses"
-          cmd /c "`"$sdkRoot\cmdline-tools\latest\bin\sdkmanager.bat`" --install platform-tools emulator `"platforms;android-29`" `"system-images;android-29;google_apis;x86`""
-
-          # Crear AVD
-          cmd /c "echo no | `"$sdkRoot\cmdline-tools\latest\bin\avdmanager.bat`" create avd -n ci_api29 -k `"system-images;android-29;google_apis;x86`" --abi google_apis/x86 --device pixel"
-
-      - name: Launch Emulator (en-US) + Run Tests + Kill Appium + Allure
-        shell: pwsh
-        run: |
-          $sdkRoot = $env:ANDROID_SDK_ROOT
-          $env:Path = "$sdkRoot\platform-tools;$sdkRoot\emulator;$env:Path"
-
-          # Lanzar emulador sin ventana y en inglés
-          Start-Process -FilePath "$sdkRoot\emulator\emulator.exe" -ArgumentList @(
-            "-avd","ci_api29",
-            "-no-window","-no-boot-anim","-noaudio","-gpu","swiftshader_indirect",
-            "-no-snapshot","-no-snapshot-save","-wipe-data",
-            "-port","5554",
-            "-prop","persist.sys.locale=en-US",
-            "-prop","persist.sys.language=en",
-            "-prop","persist.sys.country=US"
-          ) -NoNewWindow
-
-          # Esperar boot
-          $ok = $false
-          for ($i=0; $i -lt 900; $i++) {
-            $boot = & "$sdkRoot\platform-tools\adb.exe" -s emulator-5554 shell getprop sys.boot_completed 2>$null
-            if ($boot -match "1") { $ok = $true; break }
-            Start-Sleep -Seconds 1
-          }
-          if (-not $ok) { throw "Timeout esperando boot del emulador" }
-
-          # Appium en background con log
-          $appiumLog = "appium.log"
-          $appiumProc = Start-Process -FilePath "appium" -ArgumentList "--log-level $($env:APPIUM_LOG_LEVEL)" -NoNewWindow -RedirectStandardOutput $appiumLog -RedirectStandardError $appiumLog -PassThru
-
-          # Esperar puerto 4723
-          $ready = $false
-          for ($i=0; $i -lt 90; $i++) {
-            try { if ((Test-NetConnection -ComputerName "127.0.0.1" -Port 4723).TcpTestSucceeded) { $ready = $true; break } } catch {}
-            Start-Sleep -Seconds 1
-          }
-          if (-not $ready) { throw "Appium no inició" }
-
-          # Forzar locale por si acaso (ignora si no aplica)
-          & "$sdkRoot\platform-tools\adb.exe" -s emulator-5554 shell "cmd locale set en-US" | Out-Null
-          & "$sdkRoot\platform-tools\adb.exe" -s emulator-5554 shell "cmd activity set-app-language com.siltium.medicenter en-US" | Out-Null
-
-          # Instalar APK
-          & "$sdkRoot\platform-tools\adb.exe" install -r -g "$env:APP_PATH"; if ($LASTEXITCODE -ne 0) {
-            & "$sdkRoot\platform-tools\adb.exe" logcat -d | Select-Object -Last 800 | Out-File -FilePath "logcat_install.txt" -Encoding utf8
-            throw "adb install FAILED"
-          }
-
-          # Smoke launch (opcional)
-          & "$sdkRoot\platform-tools\adb.exe" shell am start -W -n "com.siltium.medicenter/.MainActivity" | Out-Null
-          Start-Sleep -Seconds 3
-
-          # Run Behave → Allure results
-          New-Item -ItemType Directory -Force -Path "allure-results" | Out-Null
-          python -m behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
-
-          # Cerrar Appium limpio antes del teardown
-          if ($appiumProc) {
-            Stop-Process -Id $appiumProc.Id -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-          }
-
-          # Generar Allure HTML
-          $alZip = Join-Path $env:RUNNER_TEMP "allure.zip"
-          Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip" -OutFile $alZip
-          Expand-Archive -Path $alZip -DestinationPath $env:RUNNER_TEMP -Force
-          & "$env:RUNNER_TEMP\allure-2.25.0\bin\allure.bat" generate allure-results -o allure-report --clean
-
-          # ZIP del reporte
-          if (Test-Path "allure-report") {
-            if (Test-Path "allure-report.zip") { Remove-Item "allure-report.zip" -Force }
-            Compress-Archive -Path "allure-report\*" -DestinationPath "allure-report.zip"
-          } else {
-            New-Item -ItemType Directory -Force -Path "allure-report" | Out-Null
-            Set-Content -Path "allure-report\index.html" -Value "<h1>Sin resultados</h1>"
-            Compress-Archive -Path "allure-report\*" -DestinationPath "allure-report.zip"
-          }
+          if [ -d allure-results ] && [ -n "$(ls -A allure-results || true)" ]; then
+            curl -sL -o allure.zip https://repo1.maven.org/maven2/io/qameta/allure/allure-commandline/2.25.0/allure-commandline-2.25.0.zip
+            unzip -q allure.zip -d $RUNNER_TEMP
+            $RUNNER_TEMP/allure-2.25.0/bin/allure generate allure-results -o allure-report --clean
+          else
+            mkdir -p allure-report
+            echo "<h1>Sin resultados</h1>" > allure-report/index.html
+          fi
+          zip -r allure-report.zip allure-report
 
       - name: Upload Allure ZIP
         if: always()
