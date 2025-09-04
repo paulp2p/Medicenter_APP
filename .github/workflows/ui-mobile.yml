@@ -31,11 +31,11 @@ jobs:
           appium driver install uiautomator2
 
       - name: Download APK from Drive
-        uses: rclone/gh-action@v2
+        uses: lselden/gh-action-rclone-upload@v1
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
           args: copyto gdrive:${{ env.GDRIVE_FILE_PATH }} ${{ runner.temp }}/app.apk
-          
+
       - name: Run Android Emulator and UI Tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -68,7 +68,7 @@ jobs:
       
       - name: Generate and Publish Allure Report
         if: always()
-        uses: simple-elf/allure-report-action@v1.7.1
+        uses: simple-elf/allure-report-action@v2.0.0
         with:
           allure_results: allure-results
           name: Allure Test Report
