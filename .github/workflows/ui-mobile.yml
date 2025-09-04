@@ -82,23 +82,16 @@ jobs:
             adb wait-for-device;
             i=0; while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done;
             i=0; while ! adb shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done;
-            adb shell "cmd locale set en-US" || true;
             adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 800 > logcat_install.txt || true; pkill -f appium || true; exit 1; };
-            # Detectar carpeta de features
             FEAT="";
-            [ -d ./features ] && FEAT="./features";
-            [ -z "$FEAT" ] && [ -d tests/features ] && FEAT="tests/features";
+            [ -d "./features" ] && FEAT="./features";
+            [ -z "$FEAT" ] && [ -d "tests/features" ] && FEAT="tests/features";
             [ -z "$FEAT" ] && FEAT="$(find . -maxdepth 3 -type d -name features | head -n1 || true)";
             [ -z "$FEAT" ] && { echo "No se encontró carpeta 'features'"; pkill -f appium || true; exit 1; };
-            echo "Usando carpeta de features: $FEAT";
-            mkdir -p allure-results;
-            # Ejecuto Behave con Allure + progreso a stdout (si falla, fallo el job)
+            echo "Usando carpeta de features: $FEAT"; ls -R "$FEAT";
+            rm -rf allure-results; mkdir -p allure-results;
             behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress2 "$FEAT";
-            # Validar resultados Allure
-            if [ ! -d allure-results ] || [ -z "$(ls -A allure-results || true)" ]; then
-              echo "ERROR: allure-results está vacío – no se ejecutaron escenarios.";
-              pkill -f appium || true; exit 1;
-            fi;
+            test -n "$(find allure-results -maxdepth 1 -type f -name '*.json' -print -quit)" || { echo "Allure vacío: no se generaron resultados"; pkill -f appium || true; exit 1; };
             pkill -f appium || true
 
       - name: Generate Allure HTML + ZIP
