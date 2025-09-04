@@ -72,7 +72,6 @@ jobs:
           avd-name: ci_api29_googleapis_x86
           force-avd-creation: true
           disable-animations: true
-          # Emulador en inglés y sin snapshots
           emulator-options: >-
             -no-window -no-boot-anim -noaudio -gpu swiftshader_indirect
             -no-snapshot -no-snapshot-save -wipe-data -no-metrics
@@ -80,16 +79,21 @@ jobs:
             -prop persist.sys.language=en
             -prop persist.sys.country=US
           script: |
-            set -euo pipefail
+            set -eu   # <- antes decía: set -euo pipefail  (bash-only)
 
-            # Appium en background y espera de puerto
+            # Appium y espera de puerto
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
-            for i in $(seq 1 90); do lsof -i :4723 >/dev/null 2>&1 && break || sleep 1; done
-            lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
+            i=0
+            while ! lsof -i :4723 >/dev/null 2>&1; do
+              i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }
+              sleep 1
+            done
 
-            # Esperar boot del emulador y reforzar locale
-            for i in $(seq 1 900); do
-              [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1" ] && break || sleep 1
+            # Esperar boot y reforzar locale
+            i=0
+            while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
+              i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }
+              sleep 1
             done
             adb shell "cmd locale set en-US" || true
             adb shell "cmd activity set-app-language com.siltium.medicenter en-US" || true
@@ -101,7 +105,7 @@ jobs:
               exit 1
             }
 
-            # Ejecutar tests → Allure results
+            # Tests → Allure
             mkdir -p allure-results
             behave -f allure_behave.formatter:AllureFormatter -o allure-results ./features
 
