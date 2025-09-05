@@ -79,43 +79,34 @@ jobs:
           disable-linux-hw-accel: true
           emulator-boot-timeout: 1800
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -accel off -wipe-data
-          script: >-
-            set -eu;
-            # Inicia Appium y espera el puerto 4723
-            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 & sleep 2;
-            i=0; while ! lsof -i :4723 >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no inició"; exit 1; }; sleep 1; done;
+          script: |
+            set -eu
+            # Inicia Appium y espera puerto 4723
+            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            for i in $(seq 1 90); do
+              if lsof -i :4723 >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
+            lsof -i :4723 >/dev/null 2>&1 || { echo "Appium no inició"; exit 1; }
 
             # Espera de boot + PackageManager
-            adb wait-for-device;
-            i=0; while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do i=$((i+1)); [ $i -ge 900 ] && { echo "Timeout boot"; exit 1; }; sleep 1; done;
-            i=0; while ! adb shell cmd package list packages >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 300 ] && { echo "Timeout esperando PackageManager"; exit 1; }; sleep 1; done;
-
-            # Anti-ANR / desbloqueo
-            adb shell "cmd activity broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true;
-            for j in 1 2 3; do adb shell input keyevent 61 || true; adb shell input keyevent 66 || true; sleep 1; done;
-            adb shell input keyevent 82 || true;
+            adb wait-for-device
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do sleep 1; done
+            until adb shell cmd package list packages >/dev/null 2>&1; do sleep 1; done
 
             # Instalar APK
-            adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 800 > logcat_install.txt || true; pkill -f appium || true; exit 1; };
+            adb install -r -g "$APP_PATH" || { echo "adb install FAILED"; adb logcat -d | tail -n 800 > logcat_install.txt || true; pkill -f appium || true; exit 1; }
 
-            # Repetimos anti-ANR justo antes de Behave
-            adb shell "cmd activity broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true;
-            for j in 1 2 3; do adb shell input keyevent 61 || true; adb shell input keyevent 66 || true; sleep 1; done;
+            # Ejecutar Behave (Allure)
+            rm -rf allure-results; mkdir -p allure-results
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress2 ./features
 
-            # Localiza carpeta de features
-            FEAT="./features"; [ -d "$FEAT" ] || FEAT="tests/features";
-            [ -d "$FEAT" ] || FEAT="$(find . -maxdepth 3 -type d -name features | head -n1 || true)";
-            [ -z "$FEAT" ] && { echo "No se encontró carpeta 'features'"; pkill -f appium || true; exit 1; };
-            echo "Usando carpeta de features: $FEAT"; ls -R "$FEAT";
+            # Verificación rápida: debe existir al menos 1 JSON
+            ls allure-results/*.json >/dev/null 2>&1 || { echo "Allure vacío"; pkill -f appium || true; exit 1; }
 
-            # Ejecuta Behave con Allure
-            rm -rf allure-results; mkdir -p allure-results;
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress "$FEAT";
-
-            # Verifica que Allure generó resultados
-            test -n "$(find allure-results -maxdepth 1 -type f -name '*.json' -print -quit)" || { echo "Allure vacío"; pkill -f appium || true; exit 1; };
-
+            # Cerrar Appium
             pkill -f appium || true
+
 
       - name: Generate Allure HTML + ZIP
         if: always()
