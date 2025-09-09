@@ -66,10 +66,10 @@ jobs:
           echo "APP_PATH=$DEST" >> $GITHUB_ENV
           ls -lh "$DEST"
 
-      - name: Run emulator (API 29, default) + tests
+      - name: Run emulator (API 30, default) + tests
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
-          api-level: 29
+          api-level: 30
           arch: x86_64
           target: google_apis
           profile: pixel_4
@@ -106,7 +106,6 @@ jobs:
 
             # Cerrar Appium
             pkill -f appium || true
-
 
       - name: Generate Allure HTML + ZIP
         if: always()
