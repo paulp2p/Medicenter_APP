@@ -96,37 +96,48 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_5
-          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -accel off
           disable-animations: true
           script: |
             set -euxo pipefail
-            echo "PWD:"; pwd; ls -la
+            echo "== PWD =="
+            pwd
+            ls -la
 
+            # Asegurar device online y sin animaciones (extra safe)
             adb wait-for-device
-            adb shell settings put global window_animation_scale 0
-            adb shell settings put global transition_animation_scale 0
-            adb shell settings put global animator_duration_scale 0
+            adb devices
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
 
+            # Iniciar Appium y esperar puerto 4723
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
-            for i in $(seq 1 90); do
-              if lsof -i :4723 >/dev/null 2>&1; then break; fi
-              [ $i -eq 90 ] && echo "Appium no inició a tiempo" && exit 1
+            for i in $(seq 1 120); do
+              if lsof -i :4723 >/dev/null 2>&1; then echo "Appium listo"; break; fi
+              [ $i -eq 120 ] && echo "Appium no inició a tiempo" && exit 1
               sleep 1
             done
 
+            # Verificar que el APK está donde esperamos (APP lo setea el YAML)
             echo "APP env: $APP"
-            test -f "$APP" || (ls -l "$(dirname "$APP")"; exit 1)
+            ls -l "$GITHUB_WORKSPACE/CI" || true
+            test -f "$APP" || { echo "APK no existe en $APP"; exit 1; }
 
-            # Ejecuta behave en la RAÍZ del repo
+            # Ejecutar tests en la RAÍZ (donde está behave.ini y requirements.txt)
             mkdir -p allure-results
             set +e
             behave -f allure_behave.formatter:AllureFormatter -o allure-results
             EXIT_CODE=$?
             set -e
 
+            # Guardar exit code para el paso siguiente
             echo "${EXIT_CODE}" > "$GITHUB_WORKSPACE/.behave_exit_code"
+
+            # Logs para artifacts
             adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
             pkill -f appium || true
+
 
 
       - name: Fail job if tests failed
@@ -147,3 +158,4 @@ jobs:
             appium.log
             logcat.txt
           if-no-files-found: warn
+
