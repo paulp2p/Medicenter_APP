@@ -80,66 +80,70 @@ jobs:
           echo "Contenido de CI/"; ls -la CI
           [ -f "$APP" ] || { echo "APK no encontrado en $APP"; exit 1; }
 
-      # Emulador Android en macOS (Apple Silicon): usar arch arm64-v8a
+      - name: Preinstall Android ARM64 image
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install "platform-tools" "emulator" "platforms;android-34" "system-images;android-34;google_apis;arm64-v8a"
+
       - name: Run emulator & tests (macOS)
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true     # Ignora teardown flakey; el estado real lo decide el paso siguiente
+        continue-on-error: true
         env:
           ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL: "0"
         with:
-          api-level: 33
+          # En Apple Silicon, usá ARM64 y API reciente
+          api-level: 34
           target: google_apis
           arch: arm64-v8a
-          profile: pixel_5
-          # En mac suele ir bien 'host'. Evitamos snapshot y boot anim.
-          emulator-options: -no-window -no-snapshot -no-boot-anim -noaudio -gpu host
+          profile: pixel_7           # evita pixel_5 (a veces no hay perfil ARM64 compatible)
+          emulator-boot-timeout: 900 # segundos, subimos el timeout
+          emulator-options: >
+            -no-window -no-snapshot -no-boot-anim -noaudio
+            -gpu host
+            -camera-back none -camera-front none
+            -verbose
           disable-animations: true
           script: |
             set -euxo pipefail
             echo "== PWD =="; pwd; ls -la
-            echo "APP env: $APP"
-            test -f "$APP"
+            echo "APP env: $APP"; test -f "$APP"
 
-            # Estabilizar ADB y esperar boot
+            # ADB estable + esperar BOOT (hasta 3 min)
             adb kill-server || true
             adb start-server || true
-            adb wait-for-device
             for i in $(seq 1 180); do
+              adb devices || true
               state="$(adb get-state 2>/dev/null || true)"
               boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-              if [ "$state" = "device" ] && [ "$boot" = "1" ]; then
-                echo "Device listo"; break
-              fi
-              adb devices || true
+              if [ "$state" = "device" ] && [ "$boot" = "1" ]; then echo "Device listo"; break; fi
               sleep 2
             done
 
-            # Desactivar animaciones (refuerzo)
+            # Desactivar animaciones
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
 
-            # Iniciar Appium y esperar puerto 4723
+            # Appium
             appium --log-level ${APPIUM_LOG_LEVEL:-info} > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
             for i in $(seq 1 120); do
-              if lsof -i :4723 >/dev/null 2>&1; then echo "Appium listo"; break; fi
+              lsof -i :4723 >/dev/null 2>&1 && break
               [ $i -eq 120 ] && echo "Appium no inició a tiempo" && exit 1
               sleep 1
             done
 
-            # Ejecutar Behave + Allure en la raíz
+            # Tests
             mkdir -p allure-results
             set +e
             behave -f allure_behave.formatter:AllureFormatter -o allure-results
             EXIT_CODE=$?
             set -e
-
-            # Guardar exit code para el paso siguiente
             echo "${EXIT_CODE}" > "$GITHUB_WORKSPACE/.behave_exit_code"
 
             # Logs
             adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
             pkill -f appium || true
+
 
       - name: Fail job if tests failed
         if: always()
