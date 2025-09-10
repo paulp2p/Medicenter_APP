@@ -85,7 +85,7 @@ jobs:
       - name: Run emulator + tests (Behave -> Allure)
         id: run-tests
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true   # Evita que el job muera por el bug de "Terminate Emulator"
+        continue-on-error: true   # seguimos ignorando el bug de "Terminate Emulator"
         with:
           api-level: 30
           arch: x86_64
@@ -104,37 +104,45 @@ jobs:
             -camera-front none
           script: |
             set +e
-            # ADB warm-up
             adb start-server || true
             adb devices
 
-            # Espera robusta de boot (por si el runner no lo detecta bien)
+            # Espera de boot (máx 180s)
+            BOOTED=0
             for i in $(seq 1 180); do
-              booted=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-              if [ "$booted" = "1" ]; then
+              if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
                 echo "Emulador booted."
+                BOOTED=1
                 break
               fi
               sleep 1
             done
 
-            # Instala el APK si corresponde (si no lo hace Appium por capability 'app')
+            mkdir -p allure-results
+            if [ "$BOOTED" -ne 1 ]; then
+              echo "Emulador no booted: no se ejecutan tests."
+              echo 98 > behave_exit_code.txt   # 98 = no boot
+              adb logcat -d > logcat.txt || true
+              exit 0
+            fi
+
+            # Instalación opcional (si no lo hace Appium con capability 'app')
             if [ -n "${APK_PATH}" ] && [ -f "${APK_PATH}" ]; then
               adb install -r "${APK_PATH}" || echo "Aviso: la instalación podría manejarla Appium/capabilities"
             fi
 
-            # Limpia y ejecuta tests con Allure
             adb logcat -c || true
-            mkdir -p allure-results
-
             behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress2
             BEHAVE_EXIT_CODE=$?
 
-            # Captura logcat y persistimos exit code
+            # Si no hay resultados, marcamos error explícito
+            if [ ! -d "allure-results" ] || [ -z "$(ls -A allure-results 2>/dev/null)" ]; then
+              echo "No se generaron allure-results."
+              [ "$BEHAVE_EXIT_CODE" -eq 0 ] && BEHAVE_EXIT_CODE=97  # 97 = sin resultados
+            fi
+
             adb logcat -d > logcat.txt || true
             echo "$BEHAVE_EXIT_CODE" > behave_exit_code.txt
-
-            # No fallar aquí para permitir subir artefactos
             exit 0
 
 
@@ -191,9 +199,14 @@ jobs:
       - name: Fail job if tests failed
         if: always()
         run: |
-          code=$(cat behave_exit_code.txt 2>/dev/null || echo 0)
+          if [ ! -f behave_exit_code.txt ]; then
+            echo "behave_exit_code.txt no existe: los tests no se ejecutaron."
+            exit 1
+          fi
+          code=$(cat behave_exit_code.txt)
           echo "Behave exit code: $code"
           if [ "$code" -ne 0 ]; then
             exit "$code"
           fi
+
 
