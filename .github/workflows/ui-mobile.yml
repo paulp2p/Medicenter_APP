@@ -1,212 +1,145 @@
-name: Android E2E (Behave + Appium)
+name: Android UI Tests (Medicenter)
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: medicenter-e2e-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  e2e-tests:
+  e2e-android:
     runs-on: ubuntu-latest
-    # “Sin timeout”: tope de GitHub 72h (4320 min)
     timeout-minutes: 120
+
     env:
+      # App & APK
+      APP_PACKAGE: com.siltium.medicenter
+      APP_ACTIVITY: com.siltium.medicenter.MainActivity
+      APK_LOCAL_PATH: CI/medicenter_app.apk
+      APP: ${{ github.workspace }}/CI/medicenter_app.apk  # usado por tu framework vía capability 'app'
+
+      # Framework toggles (ajusta si hace falta)
       APPIUM_LOG_LEVEL: info
+      LOCALE: en-US
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java (Temurin 17)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Node (for Appium)
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: MEDICENTER_APP/requirements.txt
 
       - name: Install Python deps
+        working-directory: MEDICENTER_APP
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
           pip install allure-behave
 
-      - name: Install Appium v3 (RC) + UiAutomator2 driver
+      - name: Install Appium v3 + UIAutomator2
         run: |
-          npm i -g appium@next
-          appium --version
+          npm i -g appium@3 || npm i -g appium@latest
           appium driver install uiautomator2
-          appium driver list --installed
+          appium -v
 
       - name: Install rclone
         run: |
-          sudo apt-get update
-          sudo apt-get install -y rclone
+          sudo -n apt-get update
+          sudo -n apt-get install -y rclone
 
-      # === Descarga del APK usando tu configuración por ENV (Service Account + ROOT_FOLDER_ID) ===
-      - name: Download APK from Drive (rclone + Service Account)
+      - name: Download APK from Google Drive (Service Account)
         env:
-          # Remote "GDRIVE" configurado vía variables de entorno (sin rclone config file)
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
           RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          # Ruta relativa al ROOT_FOLDER_ID
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }} # ej: CI/medicenter_app.apk
         run: |
-          set -eu
-          SRC="GDRIVE:${GDRIVE_FILE_PATH}"
-          DEST="$RUNNER_TEMP/app.apk"
-          echo "Copiando APK: $SRC -> $DEST"
-          rclone copyto "$SRC" "$DEST" -P
-          test -f "$DEST"
-          echo "APK_PATH=$DEST" >> "$GITHUB_ENV"
-          ls -lh "$DEST"
+          mkdir -p CI
+          if [ -z "${GDRIVE_FILE_PATH}" ]; then
+            echo "GDRIVE_FILE_PATH secret vacío (ej: CI/medicenter_app.apk)"; exit 1
+          fi
+          rclone copy "gdrive:${GDRIVE_FILE_PATH}" "CI/" --progress
+          ls -l CI
+          test -f "$APK_LOCAL_PATH" || { echo "APK no encontrado en $APK_LOCAL_PATH"; exit 1; }
 
-      - name: Start Appium (background) and wait port
-        run: |
-          nohup appium --log-level "${APPIUM_LOG_LEVEL}" > appium.log 2>&1 &
-          for i in $(seq 1 90); do
-            if lsof -i :4723 >/dev/null 2>&1; then
-              echo "Appium está arriba en el puerto 4723"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Appium no inició a tiempo"
-          exit 1
-
-      - name: Run emulator + tests (Behave -> Allure)
-        id: run-tests
+      - name: Run emulator & tests
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true   # seguimos ignorando el bug de "Terminate Emulator"
         with:
           api-level: 30
-          arch: x86_64
           target: google_apis
+          arch: x86_64
           profile: pixel_5
-          force-avd-creation: true
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          emulator-options: >
-            -no-window
-            -no-snapshot
-            -no-snapshot-save
-            -noaudio
-            -no-boot-anim
-            -gpu off
-            -camera-back none
-            -camera-front none
           script: |
-            set +e
-            adb start-server || true
-            adb devices
+            adb wait-for-device
+            adb shell settings put global window_animation_scale 0
+            adb shell settings put global transition_animation_scale 0
+            adb shell settings put global animator_duration_scale 0
 
-            # Espera de boot (máx 180s)
-            BOOTED=0
-            for i in $(seq 1 180); do
-              if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-                echo "Emulador booted."
-                BOOTED=1
-                break
-              fi
+            echo "Locale actual:"
+            adb shell getprop persist.sys.locale || true
+
+            # Inicia Appium y espera puerto 4723
+            appium --log-level ${APPIUM_LOG_LEVEL:-info} > appium.log 2>&1 &
+            for i in $(seq 1 90); do
+              if lsof -i :4723 >/dev/null 2>&1; then echo "Appium listo"; break; fi
+              [ $i -eq 90 ] && echo "Appium no inició a tiempo" && exit 1
               sleep 1
             done
 
+            # Ejecutar tests (Behave + Allure) en carpeta del proyecto
+            cd MEDICENTER_APP
             mkdir -p allure-results
-            if [ "$BOOTED" -ne 1 ]; then
-              echo "Emulador no booted: no se ejecutan tests."
-              echo 98 > behave_exit_code.txt   # 98 = no boot
-              adb logcat -d > logcat.txt || true
-              exit 0
-            fi
+            set +e
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results
+            EXIT_CODE=$?
+            set -e
 
-            # Instalación opcional (si no lo hace Appium con capability 'app')
-            if [ -n "${APK_PATH}" ] && [ -f "${APK_PATH}" ]; then
-              adb install -r "${APK_PATH}" || echo "Aviso: la instalación podría manejarla Appium/capabilities"
-            fi
-
-            adb logcat -c || true
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress2
-            BEHAVE_EXIT_CODE=$?
-
-            # Si no hay resultados, marcamos error explícito
-            if [ ! -d "allure-results" ] || [ -z "$(ls -A allure-results 2>/dev/null)" ]; then
-              echo "No se generaron allure-results."
-              [ "$BEHAVE_EXIT_CODE" -eq 0 ] && BEHAVE_EXIT_CODE=97  # 97 = sin resultados
-            fi
-
+            # Logs
+            cd "$GITHUB_WORKSPACE"
             adb logcat -d > logcat.txt || true
-            echo "$BEHAVE_EXIT_CODE" > behave_exit_code.txt
-            exit 0
+            exit ${EXIT_CODE:-0}
 
-
-      - name: Zip Allure results
+      - name: Upload artifacts (Allure, logs, screenshots, Appium)
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-and-logs
+          retention-days: 7
+          path: |
+            MEDICENTER_APP/allure-results/**
+            **/screenshots/**
+            appium.log
+            logcat.txt
+
+      - name: Notify Slack (optional)
+        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          if [ -d "allure-results" ]; then
-            zip -r allure-results.zip allure-results
-          else
-            echo "No se encontró allure-results"
-          fi
-
-      - name: Upload Allure results (.zip)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: allure-results-zip
-          path: allure-results.zip
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload raw Allure folder (opcional)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: allure-results-folder
-          path: allure-results
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload Appium log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: appium-log
-          path: appium.log
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload logcat
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logcat
-          path: logcat.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Stop Appium (best-effort)
-        if: always()
-        run: |
-          pkill -f appium || true
-
-      - name: Fail job if tests failed
-        if: always()
-        run: |
-          if [ ! -f behave_exit_code.txt ]; then
-            echo "behave_exit_code.txt no existe: los tests no se ejecutaron."
-            exit 1
-          fi
-          code=$(cat behave_exit_code.txt)
-          echo "Behave exit code: $code"
-          if [ "$code" -ne 0 ]; then
-            exit "$code"
-          fi
-
-
+          STATUS="${{ job.status }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="Medicenter Android UI Tests: ${STATUS} - ${RUN_URL}"
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MSG}\"}" "$SLACK_WEBHOOK_URL"
