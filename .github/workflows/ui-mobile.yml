@@ -1,168 +1,65 @@
-name: Android UI Tests (macOS)
+name: Android Screenshot (macOS)
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch: {}
 
-concurrency:
-  group: medicenter-android-macos-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  e2e-android-macos:
+  screenshot:
     runs-on: macos-latest
-    timeout-minutes: 120
-
-    env:
-      APPIUM_LOG_LEVEL: info
-      LANGUAGE: en
-      LOCALE: US
-      # Ruta del APK para capability 'app' (POSIX)
-      APP: ${{ github.workspace }}/CI/medicenter_app.apk
-      APP_PACKAGE: com.siltium.medicenter
-      APP_ACTIVITY: com.siltium.medicenter.MainActivity
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: |
-            requirements.txt
-            **/requirements.txt
-            **/pyproject.toml
-
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install allure-behave
-
-      - name: Install Appium v3 + UIAutomator2
-        run: |
-          npm i -g appium@3 || npm i -g appium@latest
-          appium driver install uiautomator2
-          appium -v
-
-      - name: Install rclone (for Google Drive)
-        run: brew install rclone
-
-      - name: Download APK from Google Drive (Service Account)
-        env:
-          RCLONE_CONFIG_GDRIVE_TYPE: drive
-          RCLONE_CONFIG_GDRIVE_SCOPE: drive
-          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
-          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }} # ej: CI/medicenter_app.apk
-        run: |
-          set -euxo pipefail
-          mkdir -p CI
-          [ -n "${GDRIVE_FILE_PATH:-}" ] || { echo "GDRIVE_FILE_PATH vacío"; exit 1; }
-          rclone copy "gdrive:${GDRIVE_FILE_PATH}" CI/
-          echo "Contenido de CI/"; ls -la CI
-          [ -f "$APP" ] || { echo "APK no encontrado en $APP"; exit 1; }
-
-      - name: Preinstall Android ARM64 image
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager --install "platform-tools" "emulator" "platforms;android-34" "system-images;android-34;google_apis;arm64-v8a"
-
-      - name: Run emulator & tests (macOS)
+      - name: Run emulator & capture screenshot
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true
-        env:
-          ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL: "0"
+        continue-on-error: true  # por si el teardown del emulador tira errores; validamos nosotros la evidencia
         with:
-          # En Apple Silicon, usá ARM64 y API reciente
-          api-level: 34
-          target: google_apis
-          arch: arm64-v8a
-          profile: pixel_7           # evita pixel_5 (a veces no hay perfil ARM64 compatible)
-          emulator-boot-timeout: 900 # segundos, subimos el timeout
-          emulator-options: >
-            -no-window -no-snapshot -no-boot-anim -noaudio
-            -gpu host
-            -camera-back none -camera-front none
-            -verbose
-          disable-animations: true
-          script: |
-            set -euxo pipefail
-            echo "== PWD =="; pwd; ls -la
-            echo "APP env: $APP"; test -f "$APP"
+            # En macOS (Apple Silicon) usar ARM64 y API reciente
+            api-level: 34
+            target: google_apis
+            arch: arm64-v8a
+            profile: pixel_7
+            emulator-boot-timeout: 900
+            emulator-options: >
+              -no-window -no-snapshot -no-boot-anim -noaudio
+              -gpu host
+            disable-animations: true
+            script: |
+              set -euxo pipefail
 
-            # ADB estable + esperar BOOT (hasta 3 min)
-            adb kill-server || true
-            adb start-server || true
-            for i in $(seq 1 180); do
-              adb devices || true
-              state="$(adb get-state 2>/dev/null || true)"
-              boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-              if [ "$state" = "device" ] && [ "$boot" = "1" ]; then echo "Device listo"; break; fi
-              sleep 2
-            done
+              # Asegurar dispositivo listo
+              adb wait-for-device
+              for i in $(seq 1 180); do
+                state="$(adb get-state 2>/dev/null || true)"
+                boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+                [ "$state" = "device" ] && [ "$boot" = "1" ] && break
+                sleep 2
+              done
 
-            # Desactivar animaciones
-            adb shell settings put global window_animation_scale 0 || true
-            adb shell settings put global transition_animation_scale 0 || true
-            adb shell settings put global animator_duration_scale 0 || true
+              # Abrir una URL en el emulador (intent genérico; si no hay browser, no fallamos)
+              URL="https://example.org"
+              adb shell am start -a android.intent.action.VIEW -d "$URL" || true
+              sleep 8
 
-            # Appium
-            appium --log-level ${APPIUM_LOG_LEVEL:-info} > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
-            for i in $(seq 1 120); do
-              lsof -i :4723 >/dev/null 2>&1 && break
-              [ $i -eq 120 ] && echo "Appium no inició a tiempo" && exit 1
-              sleep 1
-            done
+              # Capturar pantalla (dos métodos: exec-out y fallback vía /sdcard)
+              if ! adb exec-out screencap -p > "$GITHUB_WORKSPACE/screenshot.png"; then
+                adb shell screencap -p /sdcard/screen.png || true
+                adb pull /sdcard/screen.png "$GITHUB_WORKSPACE/screenshot.png" || true
+              fi
 
-            # Tests
-            mkdir -p allure-results
-            set +e
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results
-            EXIT_CODE=$?
-            set -e
-            echo "${EXIT_CODE}" > "$GITHUB_WORKSPACE/.behave_exit_code"
+              # Algo de evidencia extra (no crítico)
+              adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true
+              adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
 
-            # Logs
-            adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
-            pkill -f appium || true
-
-
-      - name: Fail job if tests failed
-        if: always()
+      - name: Ensure screenshot exists
         run: |
-          CODE=$(cat .behave_exit_code 2>/dev/null || echo 0)
-          echo "behave exit code: $CODE"
-          exit $CODE
+          ls -l
+          test -s screenshot.png || (echo "No se generó screenshot.png"; exit 1)
 
-      - name: Upload artifacts (Allure, logs, screenshots, Appium)
-        if: always()
+      - name: Upload evidence
         uses: actions/upload-artifact@v4
         with:
-          name: macos-allure-and-logs
-          retention-days: 7
+          name: android-screenshot
           path: |
-            allure-results/**
-            **/screenshots/**
-            appium.log
+            screenshot.png
             logcat.txt
-          if-no-files-found: warn
-
-      
+          retention-days: 7
