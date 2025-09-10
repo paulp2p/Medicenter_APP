@@ -53,11 +53,11 @@ jobs:
             **/pyproject.toml
 
       - name: Install Python deps
-        working-directory: MEDICENTER_APP
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install allure-behave
+
 
       - name: Install Appium v3 + UIAutomator2
         run: |
@@ -100,6 +100,8 @@ jobs:
           disable-animations: true
           script: |
             set -euxo pipefail
+            echo "PWD:"; pwd; ls -la
+
             adb wait-for-device
             adb shell settings put global window_animation_scale 0
             adb shell settings put global transition_animation_scale 0
@@ -115,7 +117,7 @@ jobs:
             echo "APP env: $APP"
             test -f "$APP" || (ls -l "$(dirname "$APP")"; exit 1)
 
-            cd "$GITHUB_WORKSPACE/MEDICENTER_APP"
+            # Ejecuta behave en la RAÍZ del repo
             mkdir -p allure-results
             set +e
             behave -f allure_behave.formatter:AllureFormatter -o allure-results
@@ -125,6 +127,7 @@ jobs:
             echo "${EXIT_CODE}" > "$GITHUB_WORKSPACE/.behave_exit_code"
             adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
             pkill -f appium || true
+
 
       - name: Fail job if tests failed
         run: |
@@ -139,7 +142,8 @@ jobs:
           name: allure-and-logs
           retention-days: 7
           path: |
-            MEDICENTER_APP/allure-results/**
+            allure-results/**
             **/screenshots/**
             appium.log
             logcat.txt
+          if-no-files-found: warn
