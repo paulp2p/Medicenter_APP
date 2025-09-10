@@ -1,161 +1,143 @@
-name: Android UI Tests (Medicenter)
+# Nombre del workflow, visible en la interfaz de GitHub Actions
+name: CI/CD - Android App Testing
 
+# Definimos los eventos que dispararán este workflow
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main # Se ejecuta en cada push a la rama 'main'
   pull_request:
-    branches: [ main ]
-  workflow_dispatch: {}
+    branches:
+      - main # Se ejecuta en cada pull request a la rama 'main'
+  workflow_dispatch: # Permite ejecutar el workflow manualmente desde la interfaz de GitHub
 
+# Configuración de concurrencia para evitar que jobs de la misma rama se solapen
 concurrency:
-  group: medicenter-e2e-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Definición del único job en este workflow
 jobs:
-  e2e-android:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+  run_tests:
+    name: Ejecutar Tests de End-to-End
+    runs-on: ubuntu-latest # El tipo de runner para ejecutar el job
+    timeout-minutes: 120 # Timeout de 120 minutos para el job completo
 
+    # Definición de las variables de entorno para el job
     env:
-      # App & APK
       APP_PACKAGE: com.siltium.medicenter
       APP_ACTIVITY: com.siltium.medicenter.MainActivity
-      APK_LOCAL_PATH: CI/medicenter_app.apk
-      APP: ${{ github.workspace }}/CI/medicenter_app.apk  # usado por tu framework vía capability 'app'
-
-      # Framework toggles (ajusta si hace falta)
-      APPIUM_LOG_LEVEL: info
-      LOCALE: en-US
+      APP: medicenter_app.apk # El nombre del archivo APK descargado
+      BASE_URL_STAGING: http://api.staging.medicenter.com # Ejemplo de URL de API
+      # Variables de rclone
+      RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+      RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+      # La variable GDRIVE_FILE_PATH no se usa directamente aquí,
+      # ya que la ruta del archivo está hardcodeada, pero se puede mantener
+      # para consistencia si los tests la necesitan.
+      GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
 
     steps:
-      - name: Checkout
+      # Paso 1: Hacer checkout del código del repositorio
+      - name: Hacer Checkout del Código
         uses: actions/checkout@v4
 
-      - name: Set up Java (Temurin 17)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Node.js
+      # Paso 2: Configurar Node.js (necesario para Appium)
+      - name: Configurar Node.js v20
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
-      - name: Set up Python
+      # Paso 3: Configurar Python (necesario para behave)
+      - name: Configurar Python v3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: |
-            requirements.txt
-            **/requirements.txt
-            **/pyproject.toml
+          python-version: '3.11'
 
-      - name: Install Python deps
+      # Paso 4: Configurar caché de pip para acelerar la instalación de dependencias
+      - name: Configurar Caché de Pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Paso 5: Instalar las dependencias de Python desde requirements.txt
+      - name: Instalar Dependencias de Python
+        run: pip install -r MEDICENTER_APP/requirements.txt
+
+      # Paso 6: Instalar Appium v3 y el driver UIAutomator2
+      - name: Instalar Appium y Drivers
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install allure-behave
-
-
-      - name: Install Appium v3 + UIAutomator2
-        run: |
-          npm i -g appium@3 || npm i -g appium@latest
+          npm install -g appium@next
           appium driver install uiautomator2
-          appium -v
 
-      - name: Install rclone
-        run: |
-          sudo -n apt-get update
-          sudo -n apt-get install -y rclone
-
-      - name: Download APK from Google Drive (Service Account)
+      # Paso 7: Instalar rclone y descargar la APK de Google Drive
+      - name: Descargar APK de Google Drive
         env:
-          RCLONE_CONFIG_GDRIVE_TYPE: drive
-          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          # Las credenciales de rclone se pasan como variables de entorno
+          # Esto es necesario para configurar rclone en el runner
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
           RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }} # ej: CI/medicenter_app.apk
         run: |
-          mkdir -p CI
-          if [ -z "${GDRIVE_FILE_PATH}" ]; then
-            echo "GDRIVE_FILE_PATH secret vacío (ej: CI/medicenter_app.apk)"; exit 1
-          fi
-          rclone copy "gdrive:${GDRIVE_FILE_PATH}" "CI/" --progress
-          ls -l CI
-          test -f "$APK_LOCAL_PATH" || { echo "APK no encontrado en $APK_LOCAL_PATH"; exit 1; }
+          # Instala rclone en el runner
+          sudo apt-get update && sudo apt-get install -y rclone
+          # Configura rclone usando las credenciales del secreto
+          echo -e "[GDRIVE]\ntype = drive\nservice_account_file = /tmp/sa.json\nroot_folder_id = ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}" > rclone.conf
+          echo "${{ secrets.GDRIVE_SA_JSON }}" > /tmp/sa.json
+          # Descarga el archivo APK
+          rclone --config rclone.conf copy "GDRIVE:/CI/medicenter_app.apk" .
 
-      - name: Run emulator & tests
-        uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true
-        env:
-          ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL: "0"
+      # Paso 8: Ejecutar los tests en un emulador Android
+      # Se usa la acción 'android-emulator-runner' para gestionar el emulador
+      - name: Ejecutar Tests en Emulador Android
+        uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          api-level: 34 # Versión de API recomendada
           target: google_apis
           arch: x86_64
           profile: pixel_5
-          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -accel off
+          locale: en-US
           disable-animations: true
+          emulator-options: -no-snapshot-load -no-window -gpu swiftshader_indirect
           script: |
-            set -euxo pipefail
-            echo "== PWD =="
-            pwd
-            ls -la
+            # Muestra las variables de entorno de Appium para depuración
+            echo "APP_PACKAGE: $APP_PACKAGE"
+            echo "APP_ACTIVITY: $APP_ACTIVITY"
+            echo "APP: $APP"
+            # Ejecuta los tests de Behave
+            behave -f allure_behave.formatter:AllureFormatter -o allure-results MEDICENTER_APP/
+            # Crea el archivo de logs de Appium (si no existe) para que la siguiente acción lo pueda subir
+            touch appium.log
 
-            # Asegurar device online y sin animaciones (extra safe)
-            adb wait-for-device
-            adb devices
-            adb shell settings put global window_animation_scale 0 || true
-            adb shell settings put global transition_animation_scale 0 || true
-            adb shell settings put global animator_duration_scale 0 || true
-
-            # Iniciar Appium y esperar puerto 4723
-            appium --log-level ${APPIUM_LOG_LEVEL:-info} > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
-            for i in $(seq 1 120); do
-              if lsof -i :4723 >/dev/null 2>&1; then echo "Appium listo"; break; fi
-              [ $i -eq 120 ] && echo "Appium no inició a tiempo" && exit 1
-              sleep 1
-            done
-
-            # Verificar que el APK está donde esperamos (APP lo setea el YAML)
-            echo "APP env: $APP"
-            ls -l "$GITHUB_WORKSPACE/CI" || true
-            test -f "$APP" || { echo "APK no existe en $APP"; exit 1; }
-
-            # Ejecutar tests en la RAÍZ (donde está behave.ini y requirements.txt)
-            mkdir -p allure-results
-            set +e
-            behave -f allure_behave.formatter:AllureFormatter -o allure-results
-            EXIT_CODE=$?
-            set -e
-
-            # Guardar exit code para el paso siguiente
-            echo "${EXIT_CODE}" > "$GITHUB_WORKSPACE/.behave_exit_code"
-
-            # Logs para artifacts
-            adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
-            pkill -f appium || true
-
-
-
-      - name: Fail job if tests failed
-        run: |
-          CODE=$(cat .behave_exit_code 2>/dev/null || echo 0)
-          echo "behave exit code: $CODE"
-          exit $CODE
-
-      - name: Upload artifacts (Allure, logs, screenshots, Appium)
-        if: always()
+      # Paso 9: Subir los resultados de Allure y otros artefactos
+      - name: Subir Resultados de Allure y Logs
         uses: actions/upload-artifact@v4
         with:
-          name: allure-and-logs
-          retention-days: 7
+          name: allure-results
+          path: allure-results/
+
+      - name: Subir Screenshots y Logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-and-screenshots
           path: |
-            allure-results/**
             **/screenshots/**
             appium.log
             logcat.txt
-          if-no-files-found: warn
+        # 'if' para asegurar que el paso no falle si los archivos no existen
+        if: always()
 
+      # Paso 10: Publicar el reporte de Allure en GitHub Pages
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v3
+
+      - name: Subir Artefactos para Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: allure-results
+
+      - name: Desplegar a GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
