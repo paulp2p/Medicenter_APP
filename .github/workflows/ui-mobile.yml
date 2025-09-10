@@ -175,14 +175,3 @@ jobs:
             appium.log
             logcat.txt
           if-no-files-found: warn
-
-      - name: Notify Slack (optional)
-        if: always() && secrets.SLACK_WEBHOOK_URL != ''
-        shell: bash
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          STATUS="${{ job.status }}"
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG="Medicenter Windows UI Tests: ${STATUS} - ${RUN_URL}"
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MSG}\"}" "$SLACK_WEBHOOK_URL"
