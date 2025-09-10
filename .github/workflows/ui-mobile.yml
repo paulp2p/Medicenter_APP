@@ -38,12 +38,13 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install allure-behave
 
-      - name: Install Appium + UiAutomator2 driver
+      - name: Install Appium v3 (RC) + UiAutomator2 driver
         run: |
-          npm i -g appium@2
+          npm i -g appium@next
           appium --version
           appium driver install uiautomator2
           appium driver list --installed
+
 
       - name: Install rclone
         run: |
