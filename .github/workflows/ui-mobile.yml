@@ -9,46 +9,48 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Run emulator & capture screenshot
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true  # por si el teardown del emulador tira errores; validamos nosotros la evidencia
+        continue-on-error: true
         with:
-            # En macOS (Apple Silicon) usar ARM64 y API reciente
-            api-level: 34
-            target: google_apis
-            arch: arm64-v8a
-            profile: pixel_7
-            emulator-boot-timeout: 900
-            emulator-options: >
-              -no-window -no-snapshot -no-boot-anim -noaudio
-              -gpu host
-            disable-animations: true
-            script: |
-              set -euxo pipefail
+          api-level: 34
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_7
+          emulator-boot-timeout: 900
+          emulator-options: >
+            -no-window -no-snapshot -no-boot-anim -noaudio
+            -gpu host
+          disable-animations: true
+          script: |
+            set -euxo pipefail
 
-              # Asegurar dispositivo listo
-              adb wait-for-device
-              for i in $(seq 1 180); do
-                state="$(adb get-state 2>/dev/null || true)"
-                boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-                [ "$state" = "device" ] && [ "$boot" = "1" ] && break
-                sleep 2
-              done
+            # Esperar emulador listo
+            adb wait-for-device
+            for i in $(seq 1 180); do
+              state="$(adb get-state 2>/dev/null || true)"
+              boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+              [ "$state" = "device" ] && [ "$boot" = "1" ] && break
+              sleep 2
+            done
 
-              # Abrir una URL en el emulador (intent genérico; si no hay browser, no fallamos)
-              URL="https://example.org"
-              adb shell am start -a android.intent.action.VIEW -d "$URL" || true
-              sleep 8
+            # Abrir una URL (navegador del emulador)
+            URL="https://example.org"
+            adb shell am start -a android.intent.action.VIEW -d "$URL" || true
+            sleep 8
 
-              # Capturar pantalla (dos métodos: exec-out y fallback vía /sdcard)
-              if ! adb exec-out screencap -p > "$GITHUB_WORKSPACE/screenshot.png"; then
-                adb shell screencap -p /sdcard/screen.png || true
-                adb pull /sdcard/screen.png "$GITHUB_WORKSPACE/screenshot.png" || true
-              fi
+            # Tomar screenshot (con fallback)
+            if ! adb exec-out screencap -p > "$GITHUB_WORKSPACE/screenshot.png"; then
+              adb shell screencap -p /sdcard/screen.png || true
+              adb pull /sdcard/screen.png "$GITHUB_WORKSPACE/screenshot.png" || true
+            fi
 
-              # Algo de evidencia extra (no crítico)
-              adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true
-              adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
+            # Evidencia extra opcional
+            adb shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true
+            adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt" || true
 
       - name: Ensure screenshot exists
         run: |
@@ -59,7 +61,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-screenshot
+          retention-days: 7
           path: |
             screenshot.png
             logcat.txt
-          retention-days: 7
