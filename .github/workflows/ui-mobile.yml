@@ -6,12 +6,11 @@ on:
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
-    # "Sin timeout": GitHub impone 72h como tope; lo seteamos al máximo.
+    # “Sin timeout”: GitHub permite hasta 72h (4320 min)
     timeout-minutes: 4320
 
     env:
       APPIUM_LOG_LEVEL: info
-      APK_PATH: CI/medicenter_app.apk
 
     steps:
       - name: Checkout
@@ -37,7 +36,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Asegura el formateador de Allure para Behave
           pip install allure-behave
 
       - name: Install Appium + UiAutomator2 driver
@@ -53,30 +51,30 @@ jobs:
           sudo apt-get install -y rclone
 
       - name: Configure rclone remote (Service Account)
-        # Secrets requeridos: GDRIVE_SA_JSON (contenido del .json)
+        # Secret requerido: GDRIVE_SA_JSON (contenido del JSON de la SA)
         env:
           GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
         run: |
           mkdir -p /tmp
           echo "$GDRIVE_SA_JSON" > /tmp/sa.json
-          # Crea un remote llamado "gdrive" usando el Service Account
           rclone config create gdrive drive service_account_file=/tmp/sa.json scope=drive --non-interactive
           rclone config show | sed 's/client_id = .*/client_id = ***redacted***/g' || true
 
       - name: Download APK from Google Drive
-        # Secret requerido: GDRIVE_APK_REMOTE_PATH (p.ej. CI/medicenter_app.apk)
+        # Secret requerido: GDRIVE_FILE_PATH (e.g. CI/medicenter_app.apk)
         env:
           GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
         run: |
           mkdir -p CI
           rclone copy "gdrive:${GDRIVE_FILE_PATH}" CI --progress
-          echo "Contenido de CI:"
-          ls -la CI
+          # Seteamos APK_PATH dinámicamente según el nombre del archivo descargado
+          APK_BASENAME="$(basename "$GDRIVE_FILE_PATH")"
+          echo "APK_PATH=CI/${APK_BASENAME}" >> "$GITHUB_ENV"
+          ls -la CI || true
 
       - name: Start Appium (background) and wait port
         run: |
           nohup appium --log-level "${APPIUM_LOG_LEVEL}" > appium.log 2>&1 &
-          # Espera hasta 90s a que Appium levante el 4723
           for i in $(seq 1 90); do
             if lsof -i :4723 >/dev/null 2>&1; then
               echo "Appium está arriba en el puerto 4723"
@@ -100,23 +98,19 @@ jobs:
           script: |
             set +e
             adb devices
-            # Instalación previa del APK (si tus tests no lo instalan via capability "app")
-            if [ -f "$APK_PATH" ]; then
-              adb install -r "$APK_PATH" || echo "Aviso: la instalación podría manejarla Appium/capabilities"
+            # Instalación previa (si tu framework no usa capability "app" para instalar)
+            if [ -n "${APK_PATH}" ] && [ -f "${APK_PATH}" ]; then
+              adb install -r "${APK_PATH}" || echo "Aviso: la instalación podría manejarla Appium/capabilities"
             fi
 
-            # Limpia logcat y ejecuta Behave con Allure
             adb logcat -c || true
             mkdir -p allure-results
 
             behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress2
             BEHAVE_EXIT_CODE=$?
 
-            # Dump de logcat para artefacto
             adb logcat -d > logcat.txt || true
             echo "$BEHAVE_EXIT_CODE" > behave_exit_code.txt
-
-            # No fallamos aquí para poder subir artefactos en pasos posteriores
             exit 0
 
       - name: Zip Allure results
