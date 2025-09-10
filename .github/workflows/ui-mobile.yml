@@ -81,52 +81,39 @@ jobs:
           dir CI
           if (!(Test-Path "${{ env.APP }}")) { throw "APK no encontrado en ${{ env.APP }}" }
 
-      - name: Start emulator + Appium + run tests
+      - name: Install Android SDK & system image (API 30)
         shell: powershell
-        continue-on-error: true
         run: |
-          # Arrancar emulador (sin aceleración hw, headless)
-          $emu = Start-Process -FilePath "$env:ANDROID_SDK_ROOT\emulator\emulator.exe" `
-                 -ArgumentList "-avd test -no-window -no-snapshot -no-boot-anim -no-audio -gpu swiftshader_indirect -accel off" `
-                 -PassThru
+          choco install -y androidsdk
 
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" start-server
-
-          # Esperar boot completo
-          $max=240
-          for ($i=0; $i -lt $max; $i++) {
-            $state = & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" get-state 2>$null
-            $boot  = & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell getprop sys.boot_completed 2>$null
-            if ($state -match "device" -and $boot -match "1") { break }
-            Start-Sleep -Seconds 2
+          # Asegurar ANDROID_SDK_ROOT (depende del paquete de choco)
+          if (-not $env:ANDROID_SDK_ROOT) {
+            if (Test-Path "C:\Android\Sdk") { $env:ANDROID_SDK_ROOT = "C:\Android\Sdk" }
+            elseif (Test-Path "C:\Android\android-sdk") { $env:ANDROID_SDK_ROOT = "C:\Android\android-sdk" }
+            else { throw "ANDROID_SDK_ROOT no encontrado" }
           }
 
-          # Desactivar animaciones
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell settings put global window_animation_scale 0
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell settings put global transition_animation_scale 0
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell settings put global animator_duration_scale 0
+          # Detectar la carpeta real de cmdline-tools (latest u otra versión)
+          $cliDir = Get-ChildItem -Path "$env:ANDROID_SDK_ROOT\cmdline-tools" -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $cliDir) { throw "cmdline-tools no encontrado en $env:ANDROID_SDK_ROOT\cmdline-tools" }
 
-          # Iniciar Appium
-          $appium = Start-Process -FilePath "appium" -ArgumentList "--log-level $env:APPIUM_LOG_LEVEL" `
-                     -NoNewWindow -RedirectStandardOutput "appium.log" -RedirectStandardError "appium.log" -PassThru
-          # Esperar puerto 4723
-          for ($i=0; $i -lt 120; $i++) {
-            if (Test-NetConnection -ComputerName "localhost" -Port 4723 -InformationLevel Quiet) { break }
-            Start-Sleep -Seconds 1
-          }
+          $sdkmanager = Join-Path $cliDir.FullName "bin\sdkmanager.bat"
+          $avdmanager = Join-Path $cliDir.FullName "bin\avdmanager.bat"
 
-          # Ejecutar tests (Allure en ./allure-results)
-          New-Item -ItemType Directory -Force -Path allure-results | Out-Null
-          $env:PYTHONIOENCODING="utf-8"
-          python -m behave -f allure_behave.formatter:AllureFormatter -o allure-results
-          $LASTEXITCODE > .behave_exit_code
+          # Aceptar licencias (NO usar '< NUL' en PowerShell)
+          echo y | & "$sdkmanager" --licenses
 
-          # Logcat
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" logcat -d > logcat.txt
+          # Actualizar e instalar componentes
+          echo y | & "$sdkmanager" --update
+          echo y | & "$sdkmanager" `
+            "platform-tools" `
+            "emulator" `
+            "platforms;android-30" `
+            "system-images;android-30;google_apis;x86_64"
 
-          # Cierre best-effort
-          if ($appium -ne $null) { Stop-Process -Id $appium.Id -Force -ErrorAction SilentlyContinue }
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" emu kill 2>$null
+          # Crear AVD
+          & "$avdmanager" create avd -n test -k "system-images;android-30;google_apis;x86_64" --device "pixel_5" --force
 
       - name: Fail job if tests failed
         shell: bash
