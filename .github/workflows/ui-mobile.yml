@@ -133,13 +133,3 @@ jobs:
             **/screenshots/**
             appium.log
             logcat.txt
-
-      - name: Notify Slack (optional)
-        if: always() && secrets.SLACK_WEBHOOK_URL != ''
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          STATUS="${{ job.status }}"
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG="Medicenter Android UI Tests: ${STATUS} - ${RUN_URL}"
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MSG}\"}" "$SLACK_WEBHOOK_URL"
