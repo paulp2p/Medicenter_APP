@@ -85,31 +85,58 @@ jobs:
       - name: Run emulator + tests (Behave -> Allure)
         id: run-tests
         uses: ReactiveCircus/android-emulator-runner@v2
+        continue-on-error: true   # Evita que el job muera por el bug de "Terminate Emulator"
         with:
           api-level: 30
           arch: x86_64
           target: google_apis
           profile: pixel_5
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          force-avd-creation: true
           disable-animations: true
+          emulator-options: >
+            -no-window
+            -no-snapshot
+            -no-snapshot-save
+            -noaudio
+            -no-boot-anim
+            -gpu off
+            -camera-back none
+            -camera-front none
           script: |
             set +e
+            # ADB warm-up
+            adb start-server || true
             adb devices
 
-            # Instalación previa (si tu framework no instala con capability "app")
+            # Espera robusta de boot (por si el runner no lo detecta bien)
+            for i in $(seq 1 180); do
+              booted=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+              if [ "$booted" = "1" ]; then
+                echo "Emulador booted."
+                break
+              fi
+              sleep 1
+            done
+
+            # Instala el APK si corresponde (si no lo hace Appium por capability 'app')
             if [ -n "${APK_PATH}" ] && [ -f "${APK_PATH}" ]; then
               adb install -r "${APK_PATH}" || echo "Aviso: la instalación podría manejarla Appium/capabilities"
             fi
 
+            # Limpia y ejecuta tests con Allure
             adb logcat -c || true
             mkdir -p allure-results
 
             behave -f allure_behave.formatter:AllureFormatter -o allure-results -f progress2
             BEHAVE_EXIT_CODE=$?
 
+            # Captura logcat y persistimos exit code
             adb logcat -d > logcat.txt || true
             echo "$BEHAVE_EXIT_CODE" > behave_exit_code.txt
+
+            # No fallar aquí para permitir subir artefactos
             exit 0
+
 
       - name: Zip Allure results
         if: always()
@@ -169,3 +196,4 @@ jobs:
           if [ "$code" -ne 0 ]; then
             exit "$code"
           fi
+
