@@ -6,9 +6,8 @@ on:
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
-    # “Sin timeout”: GitHub permite hasta 72h (4320 min)
-    timeout-minutes: 4320
-
+    # “Sin timeout”: tope de GitHub 72h (4320 min)
+    timeout-minutes: 120
     env:
       APPIUM_LOG_LEVEL: info
 
@@ -45,33 +44,30 @@ jobs:
           appium driver install uiautomator2
           appium driver list --installed
 
-
       - name: Install rclone
         run: |
           sudo apt-get update
           sudo apt-get install -y rclone
 
-      - name: Configure rclone remote (Service Account)
-        # Secret requerido: GDRIVE_SA_JSON (contenido del JSON de la SA)
+      # === Descarga del APK usando tu configuración por ENV (Service Account + ROOT_FOLDER_ID) ===
+      - name: Download APK from Drive (rclone + Service Account)
         env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-        run: |
-          mkdir -p /tmp
-          echo "$GDRIVE_SA_JSON" > /tmp/sa.json
-          rclone config create gdrive drive service_account_file=/tmp/sa.json scope=drive --non-interactive
-          rclone config show | sed 's/client_id = .*/client_id = ***redacted***/g' || true
-
-      - name: Download APK from Google Drive
-        # Secret requerido: GDRIVE_FILE_PATH (e.g. CI/medicenter_app.apk)
-        env:
+          # Remote "GDRIVE" configurado vía variables de entorno (sin rclone config file)
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          # Ruta relativa al ROOT_FOLDER_ID
           GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
         run: |
-          mkdir -p CI
-          rclone copy "gdrive:${GDRIVE_FILE_PATH}" CI --progress
-          # Seteamos APK_PATH dinámicamente según el nombre del archivo descargado
-          APK_BASENAME="$(basename "$GDRIVE_FILE_PATH")"
-          echo "APK_PATH=CI/${APK_BASENAME}" >> "$GITHUB_ENV"
-          ls -la CI || true
+          set -eu
+          SRC="GDRIVE:${GDRIVE_FILE_PATH}"
+          DEST="$RUNNER_TEMP/app.apk"
+          echo "Copiando APK: $SRC -> $DEST"
+          rclone copyto "$SRC" "$DEST" -P
+          test -f "$DEST"
+          echo "APK_PATH=$DEST" >> "$GITHUB_ENV"
+          ls -lh "$DEST"
 
       - name: Start Appium (background) and wait port
         run: |
@@ -99,7 +95,8 @@ jobs:
           script: |
             set +e
             adb devices
-            # Instalación previa (si tu framework no usa capability "app" para instalar)
+
+            # Instalación previa (si tu framework no instala con capability "app")
             if [ -n "${APK_PATH}" ] && [ -f "${APK_PATH}" ]; then
               adb install -r "${APK_PATH}" || echo "Aviso: la instalación podría manejarla Appium/capabilities"
             fi
