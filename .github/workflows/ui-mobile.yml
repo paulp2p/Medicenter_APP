@@ -13,10 +13,9 @@ jobs:
     timeout-minutes: 120
 
     env:
-      # Rutas y config base
-      ANDROID_SDK_ROOT: C:\Android\Sdk
       APPIUM_LOG_LEVEL: info
-      APP: ${{ github.workspace }}\CI\medicenter_app.apk   # capability 'app'
+      # Ruta al APK para capability 'app' (Windows usa '\')
+      APP: ${{ github.workspace }}\CI\medicenter_app.apk
       APP_PACKAGE: com.siltium.medicenter
       APP_ACTIVITY: com.siltium.medicenter.MainActivity
       LANGUAGE: en
@@ -61,34 +60,16 @@ jobs:
           appium driver install uiautomator2
           appium -v
 
-      # === Android SDK + AVD (API 30) ===
-      - name: Install Android SDK & system image (API 30)
-        shell: powershell
+      # === Android SDK (CLI tools) ===
+      - name: Setup Android CLI tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install platform tools, emulator & system image (API 30)
+        shell: bash
         run: |
-          choco install -y androidsdk
-
-          # Asegurar ANDROID_SDK_ROOT
-          if (-not $env:ANDROID_SDK_ROOT) {
-            if (Test-Path "C:\Android\Sdk") { $env:ANDROID_SDK_ROOT = "C:\Android\Sdk" }
-            elseif (Test-Path "C:\Android\android-sdk") { $env:ANDROID_SDK_ROOT = "C:\Android\android-sdk" }
-            else { throw "ANDROID_SDK_ROOT no encontrado" }
-          }
-
-          # Detectar cmdline-tools (latest u otra carpeta)
-          $cliDir = Get-ChildItem "$env:ANDROID_SDK_ROOT\cmdline-tools" -Directory -ErrorAction SilentlyContinue |
-                    Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $cliDir) { throw "cmdline-tools no encontrado en $env:ANDROID_SDK_ROOT\cmdline-tools" }
-
-          $sdkmanager = Join-Path $cliDir.FullName "bin\sdkmanager.bat"
-          $avdmanager = Join-Path $cliDir.FullName "bin\avdmanager.bat"
-
-          # Aceptar licencias y actualizar
-          echo y | & "$sdkmanager" --licenses
-          echo y | & "$sdkmanager" --update
-          echo y | & "$sdkmanager" "platform-tools" "emulator" "platforms;android-30" "system-images;android-30;google_apis;x86_64"
-
-          # Crear AVD
-          & "$avdmanager" create avd -n test -k "system-images;android-30;google_apis;x86_64" --device "pixel_5" --force
+          yes | sdkmanager --licenses
+          sdkmanager --install "platform-tools" "emulator" "platforms;android-30" "system-images;android-30;google_apis;x86_64"
+          echo "no" | avdmanager create avd -n test -k "system-images;android-30;google_apis;x86_64" --device "pixel_5" --force
 
       # === Descargar APK desde Google Drive ===
       - name: Download APK from Google Drive (Service Account)
@@ -111,25 +92,32 @@ jobs:
       - name: Start emulator + Appium + run tests
         shell: powershell
         run: |
+          # Resolver ruta del SDK (la acción setea ANDROID_HOME)
+          $SDK = $env:ANDROID_SDK_ROOT
+          if (-not $SDK) { $SDK = $env:ANDROID_HOME }
+          if (-not $SDK) { throw "No se detectó ANDROID_HOME/ANDROID_SDK_ROOT" }
+
+          Write-Host "ANDROID SDK: $SDK"
+
           # Arrancar emulador (sin aceleración HW, headless)
-          $emu = Start-Process -FilePath "$env:ANDROID_SDK_ROOT\emulator\emulator.exe" `
+          $emu = Start-Process -FilePath "$SDK\emulator\emulator.exe" `
                  -ArgumentList "-avd test -no-window -no-snapshot -no-boot-anim -no-audio -gpu swiftshader_indirect -accel off" `
                  -PassThru
 
           # ADB server y esperar boot completo
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" start-server
+          & "$SDK\platform-tools\adb.exe" start-server
           $max=240
           for ($i=0; $i -lt $max; $i++) {
-            $state = & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" get-state 2>$null
-            $boot  = & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell getprop sys.boot_completed 2>$null
+            $state = & "$SDK\platform-tools\adb.exe" get-state 2>$null
+            $boot  = & "$SDK\platform-tools\adb.exe" shell getprop sys.boot_completed 2>$null
             if ($state -match "device" -and $boot -match "1") { break }
             Start-Sleep -Seconds 2
           }
 
           # Desactivar animaciones (best-effort)
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell settings put global window_animation_scale 0 2>$null
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell settings put global transition_animation_scale 0 2>$null
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" shell settings put global animator_duration_scale 0 2>$null
+          & "$SDK\platform-tools\adb.exe" shell settings put global window_animation_scale 0 2>$null
+          & "$SDK\platform-tools\adb.exe" shell settings put global transition_animation_scale 0 2>$null
+          & "$SDK\platform-tools\adb.exe" shell settings put global animator_duration_scale 0 2>$null
 
           # Verificar APK
           Write-Host "APP env: $env:APP"
@@ -150,11 +138,11 @@ jobs:
           $LASTEXITCODE > .behave_exit_code
 
           # Logcat
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" logcat -d > logcat.txt 2>$null
+          & "$SDK\platform-tools\adb.exe" logcat -d > logcat.txt 2>$null
 
           # Cierre best-effort
           if ($appium -ne $null) { Stop-Process -Id $appium.Id -Force -ErrorAction SilentlyContinue }
-          & "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe" emu kill 2>$null
+          & "$SDK\platform-tools\adb.exe" emu kill 2>$null
 
       - name: Fail job if tests failed
         shell: bash
