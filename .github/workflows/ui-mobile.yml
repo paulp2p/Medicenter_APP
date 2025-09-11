@@ -1,4 +1,4 @@
-name: Android emulator smoke (boot + screenshot)
+name: Android emulator smoke (install browser + screenshot)
 
 on:
   workflow_dispatch:
@@ -21,8 +21,28 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Esta acción a veces falla en teardown; toleramos el error y validamos nosotros.
-      - name: Boot emulator, open URL, screenshot
+      # Descarga un navegador FOSS desde F-Droid de forma dinámica (elige el primero disponible)
+      - name: Download lightweight browser APK (F-Droid)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y jq curl
+          INDEX_URL="https://f-droid.org/repo/index-v1.json"
+          # Candidatos (ligeros → medianos). El primero que aparezca en el índice se usa.
+          for PKG in de.baumann.browser com.stoutner.privacybrowser.standard org.mozilla.fennec_fdroid; do
+            APK_NAME=$(curl -sL "$INDEX_URL" | jq -r --arg PKG "$PKG" '.packages[$PKG].versions[0].apkName // empty')
+            if [ -n "$APK_NAME" ]; then
+              echo "Elegido: $PKG ($APK_NAME)"
+              curl -L "https://f-droid.org/repo/${APK_NAME}" -o browser.apk
+              echo "BROWSER_PKG=$PKG" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+          test -f browser.apk || (echo "No pude descargar un APK de navegador desde F-Droid" && exit 1)
+          ls -lh browser.apk
+
+      # Arranca el emulador, instala el navegador, abre URL y toma captura.
+      # Nota: esta acción a veces falla en el teardown; toleramos el error y luego validamos evidencia.
+      - name: Boot emulator, install browser, open URL, screenshot
         id: emulator
         uses: ReactiveCircus/android-emulator-runner@v2
         continue-on-error: true
@@ -38,10 +58,10 @@ jobs:
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
-          # IMPORTANTE: evitar el crash interno "Disable animations"
+          # Evitamos el crash interno en "Disable animations"
           disable-animations: false
           script: |
-            set -x
+            set -euxo pipefail
             adb wait-for-device
 
             # Esperar arranque completo
@@ -49,38 +69,42 @@ jobs:
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
             sleep 5
 
-            # Mantener pantalla encendida y quitar keyguard (sin depender de "input")
+            # Mantener pantalla encendida y quitar keyguard (sin usar input)
             adb shell svc power stayon true || true
             adb shell settings put system screen_off_timeout 2147483647 || true
             adb shell wm dismiss-keyguard || true
 
-            # Deshabilitar animaciones (sin romper si falla)
+            # Deshabilitar animaciones (si falla, no rompemos)
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
 
-            # Abrir Google si hay navegador disponible (Chrome o AOSP Browser). Si no, HOME.
-            if adb shell pm list packages | grep -q com.android.chrome; then
-              adb shell am start -n com.android.chrome/com.google.android.apps.chrome.Main -d 'https://www.google.com.ar' || true
-            elif adb shell pm list packages | grep -q com.android.browser; then
-              adb shell am start -n com.android.browser/com.android.browser.BrowserActivity -d 'https://www.google.com.ar' || true
-            else
-              adb shell am start -a android.intent.action.MAIN -c android.intent.category.HOME || true
-            fi
+            # Instalar el navegador descargado
+            adb install -r "$GITHUB_WORKSPACE/browser.apk"
 
-            sleep 8
+            # Resolver el activity exacto que maneja VIEW para https:// (evita el chooser)
+            COMP=$(adb shell cmd package resolve-activity --brief -a android.intent.action.VIEW -d 'https://www.google.com.ar' | tail -n 1 | tr -d '\r')
+            echo "Componente resuelto: $COMP"
+
+            # Abrir la URL con el componente resuelto; si falla, intento genérico
+            adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar' -n "$COMP" \
+              || adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar' || true
+
+            # Dar tiempo a que cargue
+            sleep 10
 
             # Captura + metadata
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-screenshot.png" || true
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-screenshot.png"
             {
               echo "MODEL: $(adb shell getprop ro.product.model)"
               echo "ANDROID: $(adb shell getprop ro.build.version.release) (SDK $(adb shell getprop ro.build.version.sdk))"
               echo "BOOT_COMPLETED: $(adb shell getprop sys.boot_completed)"
-              echo "PACKAGES (browser/chrome):"
-              adb shell pm list packages | egrep 'chrome|browser' || true
+              echo "Browser pkg: ${BROWSER_PKG:-unknown}"
+              echo "Resolved component: $COMP"
+              adb shell pm list packages | egrep 'chrome|browser|fennec|privacy|baumann' || true
             } | tee "$GITHUB_WORKSPACE/adb-device-info.txt"
 
-      # Verificación dura: si no hay evidencia real, fallamos.
+      # Verificación dura: si no hay evidencia, rompemos el job con un mensaje claro
       - name: Validate evidence
         run: |
           test -f emulator-screenshot.png || (echo "Missing screenshot" && exit 1)
