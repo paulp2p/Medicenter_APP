@@ -56,7 +56,7 @@ jobs:
       # --- EMULADOR + flujo completo ---
       - name: Boot emulator, then download+install APK, then run tests
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true           # toleramos errores de teardown del emulador
+        continue-on-error: true   # toleramos el teardown; validamos nosotros luego
         env:
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
@@ -76,52 +76,36 @@ jobs:
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
           script: |
-            # ¡OJO!: el runner usa /bin/sh → no usar "set -o pipefail"
-            set -eux
-
-            WORK="$GITHUB_WORKSPACE"
+            # ¡OJO! Cada línea es un sh nuevo: NO confiar en variables entre líneas.
+            set -eu
 
             # --- BOOT ---
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-            adb shell svc power stayon true || true
-            adb shell settings put system screen_off_timeout 2147483647 || true
-            adb shell wm dismiss-keyguard || true
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/01-boot.png" || true
 
-            adb exec-out screencap -p > "$WORK/01-boot.png" || true
+            # --- DESCARGA APK (todo en una misma línea) ---
+            mkdir -p "$RUNNER_TEMP/apk"; APK_PATH="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"; rclone copyto "gdrive:${GDRIVE_FILE_PATH}" "$APK_PATH" -P; test -f "$APK_PATH"; sha256sum "$APK_PATH" | tee "$GITHUB_WORKSPACE/apk.sha256"
 
-            # --- DESCARGA APK ---
-            mkdir -p "$RUNNER_TEMP/apk"
-            SRC="gdrive:${GDRIVE_FILE_PATH}"
-            DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
-            rclone copyto "$SRC" "$DEST" -P
-            test -f "$DEST"
-            APK="$DEST"
-            sha256sum "$APK" | tee "$WORK/apk.sha256"
+            # --- INSTALACIÓN + EVIDENCIAS ---
+            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_before.txt"
+            adb install -r "$APK_PATH" | tee "$GITHUB_WORKSPACE/adb_install_output.txt"
+            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_after.txt"
+            comm -13 "$GITHUB_WORKSPACE/pkgs_before.txt" "$GITHUB_WORKSPACE/pkgs_after.txt" | head -n1 | sed -E 's|.*/([^=]+)=.*|\1|' | tee "$GITHUB_WORKSPACE/new_package.txt" || true
+            PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$GITHUB_WORKSPACE/${PKG}_path.txt" || true
 
-            # --- INSTALACIÓN ---
-            adb shell pm list packages -f | sort > "$WORK/pkgs_before.txt"
-            adb install -r "$APK" | tee "$WORK/adb_install_output.txt"
-            adb shell pm list packages -f | sort > "$WORK/pkgs_after.txt"
-            NEWLINE="$(comm -13 "$WORK/pkgs_before.txt" "$WORK/pkgs_after.txt" | head -n1 || true)"
-            PKG="$(echo "$NEWLINE" | sed -E 's|.*/([^=]+)=.*|\1|' || true)"
-            echo "PKG=$PKG" | tee "$WORK/new_package.txt"
-            [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$WORK/${PKG}_path.txt" || true
-
-            # Lanzar y evidenciar
-            [ -n "$PKG" ] && adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
+            # Lanzar app y capturar
+            PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
             sleep 6
-            adb exec-out screencap -p > "$WORK/02-after-install.png" || true
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/02-after-install.png" || true
 
-            # --- APPIUM + TESTS ---
-            appium --log-level info > "$WORK/appium.log" 2>&1 &
-            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 90 ] && echo "Appium no levantó" && exit 1; sleep 1; done
-
-            mkdir -p "$WORK/allure-results"
-            behave -f allure_behave.formatter:AllureFormatter -o "$WORK/allure-results" -f pretty || true
-
-            adb exec-out screencap -p > "$WORK/03-after-tests.png" || true
+            # --- Appium + Behave ---
+            appium --log-level info > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
+            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no levantó"; exit 1; }; sleep 1; done
+            mkdir -p "$GITHUB_WORKSPACE/allure-results"
+            behave -f allure_behave.formatter:AllureFormatter -o "$GITHUB_WORKSPACE/allure-results" -f pretty || true
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/03-after-tests.png" || true
             pkill -f appium || true
 
       # --- VALIDACIÓN DURA (si falla, el job queda ROJO) ---
