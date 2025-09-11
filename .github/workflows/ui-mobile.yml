@@ -53,11 +53,11 @@ jobs:
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
       # 5) Emulador → boot → (ahora) descargar APK → instalar → Appium → Behave → evidencias
+      # --- EMULADOR + flujo completo ---
       - name: Boot emulator, then download+install APK, then run tests
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true   # el teardown del emulador a veces devuelve error; validamos nosotros
+        continue-on-error: true           # toleramos errores de teardown del emulador
         env:
-          # Secrets de Drive para rclone DENTRO del script
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
@@ -76,25 +76,22 @@ jobs:
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
           script: |
-            set -euxo pipefail
+            # ¡OJO!: el runner usa /bin/sh → no usar "set -o pipefail"
+            set -eux
+
             WORK="$GITHUB_WORKSPACE"
 
-            # --- EMULADOR: BOOT ---
+            # --- BOOT ---
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-            # Mantener pantalla / quitar keyguard / desactivar animaciones (sin romper si falla)
             adb shell svc power stayon true || true
             adb shell settings put system screen_off_timeout 2147483647 || true
             adb shell wm dismiss-keyguard || true
-            adb shell settings put global window_animation_scale 0 || true
-            adb shell settings put global transition_animation_scale 0 || true
-            adb shell settings put global animator_duration_scale 0 || true
 
-            # Screenshot del boot (evidencia)
             adb exec-out screencap -p > "$WORK/01-boot.png" || true
 
-            # --- DESCARGA APK (ahora que el emulador YA está listo, como pediste) ---
+            # --- DESCARGA APK ---
             mkdir -p "$RUNNER_TEMP/apk"
             SRC="gdrive:${GDRIVE_FILE_PATH}"
             DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
@@ -103,41 +100,40 @@ jobs:
             APK="$DEST"
             sha256sum "$APK" | tee "$WORK/apk.sha256"
 
-            # --- INSTALACIÓN APK ---
+            # --- INSTALACIÓN ---
             adb shell pm list packages -f | sort > "$WORK/pkgs_before.txt"
             adb install -r "$APK" | tee "$WORK/adb_install_output.txt"
-            grep -q "Success" "$WORK/adb_install_output.txt" || { echo "Instalación fallida"; exit 1; }
-
             adb shell pm list packages -f | sort > "$WORK/pkgs_after.txt"
             NEWLINE="$(comm -13 "$WORK/pkgs_before.txt" "$WORK/pkgs_after.txt" | head -n1 || true)"
             PKG="$(echo "$NEWLINE" | sed -E 's|.*/([^=]+)=.*|\1|' || true)"
             echo "PKG=$PKG" | tee "$WORK/new_package.txt"
             [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$WORK/${PKG}_path.txt" || true
 
-            # Abrir la app (best-effort) y screenshot
-            if [ -n "$PKG" ]; then
-              adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
-            fi
+            # Lanzar y evidenciar
+            [ -n "$PKG" ] && adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
             sleep 6
             adb exec-out screencap -p > "$WORK/02-after-install.png" || true
 
-            # --- APPIUM + TESTS (Behave) ---
+            # --- APPIUM + TESTS ---
             appium --log-level info > "$WORK/appium.log" 2>&1 &
-            # Esperar puerto 4723
-            for i in $(seq 1 90); do
-              (echo > /dev/tcp/127.0.0.1/4723) >/dev/null 2>&1 && break || sleep 1
-              [ "$i" -eq 90 ] && echo "Appium no levantó" && exit 1
-            done
+            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 90 ] && echo "Appium no levantó" && exit 1; sleep 1; done
 
             mkdir -p "$WORK/allure-results"
-            # Ejecuta tus features; ajusta tags/paths si hace falta
             behave -f allure_behave.formatter:AllureFormatter -o "$WORK/allure-results" -f pretty || true
 
-            # Screenshot final
             adb exec-out screencap -p > "$WORK/03-after-tests.png" || true
-
-            # Cerrar Appium
             pkill -f appium || true
+
+      # --- VALIDACIÓN DURA (si falla, el job queda ROJO) ---
+      - name: Validate evidence
+        run: |
+          set -eu
+          test -s apk.sha256 || (echo "Falta apk.sha256" && exit 1)
+          test -s adb_install_output.txt || (echo "Falta adb_install_output.txt" && exit 1)
+          grep -q "Success" adb_install_output.txt || (echo "adb install no devolvió 'Success'" && exit 1)
+          test -s 01-boot.png || (echo "Falta 01-boot.png" && exit 1)
+          test -s 02-after-install.png || (echo "Falta 02-after-install.png" && exit 1)
+          echo "Validación OK: boot, instalación y evidencias presentes"
 
       # 6) Allure HTML opcional + artifacts
       - name: Generate Allure HTML report
