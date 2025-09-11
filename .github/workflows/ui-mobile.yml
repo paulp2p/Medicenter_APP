@@ -1,116 +1,63 @@
-name: Android Screenshot (Windows)
+name: Android emulator smoke (boot + screenshot)
 
 on:
-  # Lo lanzás manualmente desde la pestaña "Actions"
-  workflow_dispatch: {}
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/android-smoke.yml'
 
 jobs:
-  screenshot:
-    runs-on: windows-latest
-    timeout-minutes: 60  # timeout total del job
+  smoke:
+    runs-on: ubuntu-latest      # Runner hospedado por GitHub (VM efímera)
+    timeout-minutes: 60         # Límite total del job
 
     steps:
-      # 1) Obtiene el código del repo en el runner
+      # 1) Obtener el repo (necesario aunque no usemos archivos)
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Prepara las CLI de Android (sdkmanager, avdmanager, emulator, adb) en el PATH
-      - name: Setup Android CLI tools
-        uses: android-actions/setup-android@v3
+      # 2) Java para herramientas del SDK (adb, sdkmanager)
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
-      # 3) Instala componentes mínimos del SDK y crea el AVD Pixel 5 (API 30, google_apis, x86_64)
-      - name: Install SDK packages + Create AVD (API 30 Pixel 5)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # Aceptar licencias de SDK (respuesta "yes" automática)
-          yes | sdkmanager --licenses
-          # Herramientas base + imagen de sistema API 30 (google_apis, x86_64)
-          sdkmanager --install "platform-tools" "emulator" "platforms;android-30" "system-images;android-30;google_apis;x86_64"
-          # Crear AVD Pixel 5 (respondemos "no" a snapshot)
-          echo "no" | avdmanager create avd -n ci-api30-pixel5 -k "system-images;android-30;google_apis;x86_64" --device "pixel_5" --force
+      # 3) Levantar emulador, abrir URL y capturar pantalla
+      - name: Boot emulator, open URL, screenshot
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          force-avd-creation: true
+          emulator-options: '-no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -camera-back none -camera-front none'
+          disable-animations: true
+          script: |
+            adb wait-for-device
+            # Esperar arranque completo
+            until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
+            # Desbloquear pantalla
+            adb shell input keyevent 82
+            # Abrir navegador a Google Argentina (elige el browser disponible)
+            adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar'
+            # Dar tiempo a que cargue
+            sleep 8
+            # Captura de pantalla -> workspace
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/emulator-screenshot.png
+            # Info del dispositivo como evidencia adicional
+            {
+              echo "MODEL: $(adb shell getprop ro.product.model)"
+              echo "ANDROID: $(adb shell getprop ro.build.version.release) (SDK $(adb shell getprop ro.build.version.sdk))"
+              echo "BOOT_COMPLETED: $(adb shell getprop sys.boot_completed)"
+            } | tee $GITHUB_WORKSPACE/adb-device-info.txt
 
-      # 4) Arranca el emulador, espera boot, abre navegador, toma screenshot y recolecta evidencia
-      - name: Boot emulator, open browser, capture screenshot
-        shell: powershell
-        run: |
-          # --- Ubicar el SDK configurado por la acción anterior ---
-          $SDK = $env:ANDROID_SDK_ROOT
-          if (-not $SDK) { $SDK = $env:ANDROID_HOME }
-          if (-not $SDK) { throw "No se detectó ANDROID_HOME / ANDROID_SDK_ROOT" }
-          Write-Host "Android SDK: $SDK"
-
-          # --- (Opcional) Registrar versión del emulador para evidencia ---
-          & "$SDK\emulator\emulator.exe" -version | Out-File -FilePath emulator-version.txt -Encoding ascii
-
-          # --- Lanzar el emulador en segundo plano (sin UI, sin snapshots, sin HW accel) ---
-          $emuArgs = "-avd ci-api30-pixel5 -no-window -no-snapshot -no-boot-anim -no-audio -gpu swiftshader_indirect -accel off"
-          $emu = Start-Process -FilePath "$SDK\emulator\emulator.exe" -ArgumentList $emuArgs -PassThru
-          Write-Host "Emulator PID: $($emu.Id)"
-
-          # --- Iniciar ADB server y esperar a que el emulador arranque por completo ---
-          & "$SDK\platform-tools\adb.exe" start-server | Out-Null
-          $max = 360   # ~6 minutos de espera
-          for ($i=0; $i -lt $max; $i++) {
-            $state = & "$SDK\platform-tools\adb.exe" get-state 2>$null
-            $boot  = & "$SDK\platform-tools\adb.exe" shell getprop sys.boot_completed 2>$null
-            if ($state -match "device" -and $boot -match "1") { Write-Host "Device listo"; break }
-            Start-Sleep -Seconds 2
-            if ($i % 15 -eq 0) { & "$SDK\platform-tools\adb.exe" devices }
-          }
-
-          # --- Intent genérico para abrir el navegador en https://www.google.com.ar ---
-          $url = "https://www.google.com.ar"
-          $opened = $true
-          try {
-            & "$SDK\platform-tools\adb.exe" shell am start -a android.intent.action.VIEW -d $url | Out-Null
-          } catch { $opened = $false }
-
-          # --- Fallbacks por si no existe un handler por defecto del intent VIEW ---
-          if (-not $opened) {
-            # Intentar Chrome (si estuviera presente)
-            try { & "$SDK\platform-tools\adb.exe" shell am start -n "com.android.chrome/com.google.android.apps.chrome.Main" -d $url | Out-Null; $opened = $true } catch { }
-          }
-          if (-not $opened) {
-            # Intentar Browser AOSP
-            try { & "$SDK\platform-tools\adb.exe" shell am start -n "com.android.browser/com.android.browser.BrowserActivity" -d $url | Out-Null; $opened = $true } catch { }
-          }
-
-          # --- Tiempo para que cargue la página ---
-          Start-Sleep -Seconds 15
-
-          # --- Tomar screenshot: guardar en /sdcard y traerlo al workspace ---
-          & "$SDK\platform-tools\adb.exe" shell screencap -p /sdcard/screen.png | Out-Null
-          & "$SDK\platform-tools\adb.exe" pull /sdcard/screen.png "$env:GITHUB_WORKSPACE\screenshot.png" | Out-Null
-
-          # --- Evidencia adicional: props del dispositivo y logcat ---
-          & "$SDK\platform-tools\adb.exe" shell getprop > "$env:GITHUB_WORKSPACE\device-props.txt"
-          & "$SDK\platform-tools\adb.exe" logcat -d > "$env:GITHUB_WORKSPACE\logcat.txt"
-
-          # --- (Opcional) Listado de AVDs para evidencia ---
-          $avdManager = Get-ChildItem "$SDK\cmdline-tools" -Recurse -Filter "avdmanager.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($avdManager) { & "$($avdManager.FullName)" list avd > "$env:GITHUB_WORKSPACE\avd-list.txt" }
-
-          # --- Cerrar el emulador (best-effort) ---
-          & "$SDK\platform-tools\adb.exe" emu kill 2>$null
-
-      # 5) Verifica que la captura exista (si no, el job falla acá)
-      - name: Ensure screenshot exists
-        shell: powershell
-        run: |
-          Get-ChildItem -Force
-          if (!(Test-Path ".\screenshot.png")) { throw "No se generó screenshot.png" }
-          if ((Get-Item ".\screenshot.png").Length -le 0) { throw "screenshot.png está vacío" }
-
-      # 6) Sube artifacts con la evidencia
-      - name: Upload evidence
+      # 4) Subir evidencia (screenshot + info)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-screenshot-windows
-          retention-days: 7
+          name: emulator-evidence
           path: |
-            screenshot.png
-            logcat.txt
-            device-props.txt
-            emulator-version.txt
-            avd-list.txt
+            emulator-screenshot.png
+            adb-device-info.txt
