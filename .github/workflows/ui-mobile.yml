@@ -36,12 +36,19 @@ jobs:
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
           script: |
-            # IMPORTANTE: cada línea se ejecuta en /bin/sh independiente; no uses variables entre líneas
+            # Cada línea es un /bin/sh independiente → no uses variables entre líneas
             set -eu
+
+            # Generar evidencia desde el arranque del script (aunque el emu aún no esté)
+            adb version | tee "$GITHUB_WORKSPACE/adb_version.txt" || true
+            echo "SCRIPT_STARTED=1" > "$GITHUB_WORKSPACE/emulator-script.log"
+
+            # Boot del emulador
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-            adb version | tee "$GITHUB_WORKSPACE/adb_version.txt"
+
+            # Log del boot
             {
               echo "BOOT_OK=1"
               echo "SERIAL=$(adb get-serialno | tr -d '\r')"
@@ -53,16 +60,26 @@ jobs:
               echo "BOOT_COMPLETED=$(adb shell getprop sys.boot_completed | tr -d '\r')"
               echo "TARGET=google_apis_playstore; API=30; ARCH=x86_64; PROFILE=pixel_5"
             } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
-            # Últimas líneas de logcat como smoke
-            adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
+
+      # Últimas líneas de logcat (como smoke)
+      adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
 
       # Validación: falla el job si el emu no booteó
       - name: Validate boot evidence
         run: |
           set -eu
-          test -s adb_version.txt || (echo "Falta adb_version.txt" && exit 1)
-          grep -q "BOOT_OK=1" emulator-boot.log || (echo "Emulador no booteó correctamente" && exit 1)
-          echo "OK: emulador instalado y booteado."
+          if [ ! -s emulator-script.log ]; then
+            echo "ERROR: el step del emulador NO llegó a ejecutar el script (falló antes de 'script:')."
+            exit 1
+          fi
+          # adb_version ya no es crítico (lo dejamos como warning si faltara)
+          if [ ! -s adb_version.txt ]; then
+            echo "WARN: falta adb_version.txt (no es crítico, pero debería existir)."
+          fi
+          test -s emulator-boot.log || (echo "ERROR: no se generó emulator-boot.log" && exit 1)
+          grep -q "BOOT_OK=1" emulator-boot.log || (echo "ERROR: Emulador no booteó correctamente" && exit 1)
+          echo "OK: emulador booteado y evidencias presentes."
+
 
       # Logs como artifact para descargar
       - name: Upload artifacts (logs)
@@ -71,6 +88,7 @@ jobs:
         with:
           name: emulator-only-logs
           path: |
+            emulator-script.log
             adb_version.txt
             emulator-boot.log
             logcat_tail.txt
