@@ -21,8 +21,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Esta acción a veces falla en "Terminate Emulator" aun cuando el script salió OK.
-      # Usamos continue-on-error y luego validamos la evidencia para decidir el estado real del job.
+      # Esta acción a veces falla en teardown; toleramos el error y validamos nosotros.
       - name: Boot emulator, open URL, screenshot
         id: emulator
         uses: ReactiveCircus/android-emulator-runner@v2
@@ -39,29 +38,49 @@ jobs:
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
-          disable-animations: true
+          # IMPORTANTE: evitar el crash interno "Disable animations"
+          disable-animations: false
           script: |
+            set -x
             adb wait-for-device
+
+            # Esperar arranque completo
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
             sleep 5
+
+            # Mantener pantalla encendida y quitar keyguard (sin depender de "input")
             adb shell svc power stayon true || true
             adb shell settings put system screen_off_timeout 2147483647 || true
             adb shell wm dismiss-keyguard || true
+
+            # Deshabilitar animaciones (sin romper si falla)
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
+
+            # Abrir Google si hay navegador disponible (Chrome o AOSP Browser). Si no, HOME.
             if adb shell pm list packages | grep -q com.android.chrome; then
               adb shell am start -n com.android.chrome/com.google.android.apps.chrome.Main -d 'https://www.google.com.ar' || true
+            elif adb shell pm list packages | grep -q com.android.browser; then
+              adb shell am start -n com.android.browser/com.android.browser.BrowserActivity -d 'https://www.google.com.ar' || true
             else
-              adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar' || true
+              adb shell am start -a android.intent.action.MAIN -c android.intent.category.HOME || true
             fi
+
             sleep 8
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-screenshot.png"
+
+            # Captura + metadata
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-screenshot.png" || true
             {
               echo "MODEL: $(adb shell getprop ro.product.model)"
               echo "ANDROID: $(adb shell getprop ro.build.version.release) (SDK $(adb shell getprop ro.build.version.sdk))"
               echo "BOOT_COMPLETED: $(adb shell getprop sys.boot_completed)"
+              echo "PACKAGES (browser/chrome):"
+              adb shell pm list packages | egrep 'chrome|browser' || true
             } | tee "$GITHUB_WORKSPACE/adb-device-info.txt"
 
-      # Verificación dura: si no hay evidencia, fallamos el job.
+      # Verificación dura: si no hay evidencia real, fallamos.
       - name: Validate evidence
         run: |
           test -f emulator-screenshot.png || (echo "Missing screenshot" && exit 1)
