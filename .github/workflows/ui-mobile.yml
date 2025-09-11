@@ -56,7 +56,7 @@ jobs:
       # --- EMULADOR + flujo completo ---
       - name: Boot emulator, then download+install APK, then run tests
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true   # toleramos el teardown; validamos nosotros luego
+        continue-on-error: true
         env:
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
@@ -66,7 +66,7 @@ jobs:
         with:
           api-level: 30
           target: google_apis
-          arch: x86_64
+          arch: x86_64              # si sale NO_MATCHING_ABIS, probar arm64-v8a
           profile: pixel_5
           force-avd-creation: true
           disable-animations: false
@@ -76,48 +76,80 @@ jobs:
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
           script: |
-            # ¡OJO! Cada línea es un sh nuevo: NO confiar en variables entre líneas.
+            # /bin/sh: no usar pipefail; cada línea es un sh nuevo → no persisten variables
             set -eu
 
-            # --- BOOT ---
+            # --- Sanity de secreto de ruta ---
+            test -n "${GDRIVE_FILE_PATH:-}" || { echo "ERROR: GDRIVE_FILE_PATH vacío"; exit 1; }
+
+            # --- BOOT + screenshot ---
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/01-boot.png" || true
 
-            # --- DESCARGA APK (todo en una misma línea) ---
+            # --- DESCARGA APK ---
             mkdir -p "$RUNNER_TEMP/apk"; APK_PATH="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"; rclone copyto "gdrive:${GDRIVE_FILE_PATH}" "$APK_PATH" -P; test -f "$APK_PATH"; sha256sum "$APK_PATH" | tee "$GITHUB_WORKSPACE/apk.sha256"
 
-            # --- INSTALACIÓN + EVIDENCIAS ---
+            # ABIs detectadas en el APK (si es .apk normal)
+            ( command -v unzip >/dev/null 2>&1 && unzip -l "$APK_PATH" | awk '/lib\/[^/]+\//{print $4}' | cut -d/ -f2 | sort -u ) > "$GITHUB_WORKSPACE/apk_abis.txt" || true
+
+            # --- INSTALACIÓN + evidencias ---
             adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_before.txt"
-            adb install -r "$APK_PATH" | tee "$GITHUB_WORKSPACE/adb_install_output.txt"
+            adb install -r -d -t "$APK_PATH" | tee "$GITHUB_WORKSPACE/adb_install_output.txt" || true
             adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_after.txt"
             comm -13 "$GITHUB_WORKSPACE/pkgs_before.txt" "$GITHUB_WORKSPACE/pkgs_after.txt" | head -n1 | sed -E 's|.*/([^=]+)=.*|\1|' | tee "$GITHUB_WORKSPACE/new_package.txt" || true
             PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$GITHUB_WORKSPACE/${PKG}_path.txt" || true
 
-            # Lanzar app y capturar
+            # Intento de abrir y screenshot
             PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
             sleep 6
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/02-after-install.png" || true
 
-            # --- Appium + Behave ---
+            # --- Appium + Behave (best-effort para dejar evidencias aunque la instalación falle) ---
             appium --log-level info > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
-            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 90 ] && { echo "Appium no levantó"; exit 1; }; sleep 1; done
+            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 60 ] && { echo "Appium no levantó"; break; }; sleep 1; done
             mkdir -p "$GITHUB_WORKSPACE/allure-results"
             behave -f allure_behave.formatter:AllureFormatter -o "$GITHUB_WORKSPACE/allure-results" -f pretty || true
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/03-after-tests.png" || true
             pkill -f appium || true
 
-      # --- VALIDACIÓN DURA (si falla, el job queda ROJO) ---
-      - name: Validate evidence
+      - name: Validate evidence (fail if missing, explica motivo)
         run: |
           set -eu
+          # Mostrar log de instalación
+          echo "===== adb_install_output.txt ====="
+          ( test -f adb_install_output.txt && cat adb_install_output.txt ) || echo "(no existe)"
+          echo "===== apk_abis.txt (si hay) ====="
+          ( test -s apk_abis.txt && cat apk_abis.txt ) || echo "(no detectado)"
+
+          # Fallas específicas y mensaje claro
+          if ! grep -q "Success" adb_install_output.txt 2>/dev/null; then
+            if grep -qi "NO_MATCHING_ABIS" adb_install_output.txt 2>/dev/null; then
+              echo "ERROR: ABI incompatible (APK ABIs vs emulador x86_64)."
+              echo "Sugerencias:"
+              echo " - Cambiar el emulador a ARM: en el step del emulador usa: arch: arm64-v8a"
+              echo " - O compilar un APK universal que incluya x86/x86_64."
+            elif grep -qi "VERSION_DOWNGRADE" adb_install_output.txt 2>/dev/null; then
+              echo "ERROR: Version downgrade. Usé -d, pero igual falló. Desinstalar primero o subir versionCode."
+            elif grep -qi "UPDATE_INCOMPATIBLE" adb_install_output.txt 2>/dev/null; then
+              echo "ERROR: Firma/paquete incompatible con lo ya instalado. Probar: adb uninstall <package> antes."
+            elif grep -qi "INCOMPATIBLE" adb_install_output.txt 2>/dev/null; then
+              echo "ERROR: Incompatibilidad (revisar minSdk/target/abi)."
+            elif grep -qi "PARSE" adb_install_output.txt 2>/dev/null; then
+              echo "ERROR: APK corrupto o sin firmar (PARSE_FAILED)."
+            else
+              echo "ERROR: Instalación fallida. Revisa 'adb_install_output.txt'."
+            fi
+            exit 1
+          fi
+
+          # Evidencias mínimas
           test -s apk.sha256 || (echo "Falta apk.sha256" && exit 1)
-          test -s adb_install_output.txt || (echo "Falta adb_install_output.txt" && exit 1)
-          grep -q "Success" adb_install_output.txt || (echo "adb install no devolvió 'Success'" && exit 1)
           test -s 01-boot.png || (echo "Falta 01-boot.png" && exit 1)
           test -s 02-after-install.png || (echo "Falta 02-after-install.png" && exit 1)
           echo "Validación OK: boot, instalación y evidencias presentes"
+
 
       # 6) Allure HTML opcional + artifacts
       - name: Generate Allure HTML report
