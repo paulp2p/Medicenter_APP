@@ -1,19 +1,19 @@
-name: UI Mobile — env + emulator + download + install + tests
+name: Android env + emulator smoke (no APK)
 
 on:
   workflow_dispatch:
 
 jobs:
-  ui-mobile:
+  env-and-emulator:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 40
 
     steps:
-      # 1) Código del repo (features/steps/utils/etc.)
+      # 1) Traer el repo (opcional, pero buena práctica)
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Toolchain del SO (Java, Node, Python)
+      # 2) SO: Java / Node / Python (versiones pedidas)
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -30,178 +30,90 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 3) Appium + plugins y dependencias Python de tests
-      - name: Install Appium & test deps
-        run: |
-          set -euxo pipefail
-          npm i -g appium @appium/doctor allure-commandline --no-audit --no-fund
-          appium -v | tee appium_version.txt
-          # Appium 2 requiere instalar el driver explícitamente
-          appium driver install uiautomator2
-          appium-doctor --android | tee appium_doctor.txt
-
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install appium-python-client behave allure-behave requests
-          fi
-
-      # 4) rclone (lo usaremos más abajo, DENTRO del step del emulador)
-      - name: Install rclone
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-
-      - name: Precheck Drive path (lsf + existe)
-        env:
-          RCLONE_CONFIG_GDRIVE_TYPE: drive
-          RCLONE_CONFIG_GDRIVE_SCOPE: drive
-          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
-          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}  # CI/medicenter_app.apk
+      # 3) Appium + Doctor + driver UiAutomator2
+      - name: Install Appium & tools
         run: |
           set -eu
-          test -n "${GDRIVE_FILE_PATH:-}" || (echo "GDRIVE_FILE_PATH vacío" && exit 1)
-          echo "Listado de gdrive:CI/"
-          rclone lsf "gdrive:CI" || true
-          echo "Comprobando archivo exacto: gdrive:${GDRIVE_FILE_PATH}"
-          rclone lsf "gdrive:${GDRIVE_FILE_PATH}" >/dev/null || { echo "No existe ${GDRIVE_FILE_PATH} dentro del ROOT_FOLDER_ID"; exit 1; }
+          npm i -g appium @appium/doctor --no-audit --no-fund
+          appium driver install uiautomator2
+          {
+            echo "JAVA: $(java -version 2>&1 | head -n1)"
+            echo "NODE: $(node -v)"
+            echo "NPM:  $(npm -v)"
+            echo "PY:   $(python --version 2>&1)"
+            echo "APPIUM: $(appium -v)"
+          } | tee env-versions.txt
+          appium-doctor --android | tee appium_doctor.txt || true
 
+      # 4) (Opcional) Exponer rutas del SDK en PATH para próximos steps de este job
+      - name: Export ANDROID_SDK_ROOT and PATH
+        run: |
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          {
+            echo "/usr/local/lib/android/sdk/platform-tools"
+            echo "/usr/local/lib/android/sdk/emulator"
+            echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin"
+          } >> "$GITHUB_PATH"
 
-      # 5) Emulador → boot → (ahora) descargar APK → instalar → Appium → Behave → evidencias
-      # --- EMULADOR + flujo completo ---
-      - name: Boot emulator, download + install APK, run tests
+      # 5) Emulador: boot y recolección de logs (NO instala ni abre apps)
+      - name: Boot emulator (API 30) and collect logs
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true
-        env:
-          RCLONE_CONFIG_GDRIVE_TYPE: drive
-          RCLONE_CONFIG_GDRIVE_SCOPE: drive
-          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
-          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}  # CI/medicenter_app.apk
+        continue-on-error: true          # el teardown del emu a veces emite warning/exit; validamos luego
         with:
           api-level: 30
-          target: google_apis
-          arch: x86_64         # si después marca ABI incompatible, probamos arm64-v8a
+          target: google_apis_playstore  # imagen con Chrome preinstalado (según tu requisito)
+          arch: x86_64
           profile: pixel_5
           force-avd-creation: true
-          disable-animations: false
+          # Arranque limpio/headless
           emulator-options: >
             -no-window -no-boot-anim
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
+          disable-animations: false
           script: |
-            # /bin/sh (una línea = un shell): no persistir variables entre líneas
+            # Importante: el action ejecuta cada línea en /bin/sh; evitar variables entre líneas.
             set -eu
-
-            # --- BOOT + screenshot ---
+            # Esperar que Android quede listo
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/01-boot.png" || true
+            # Evidencia básica del emulador
+            adb version | tee "$GITHUB_WORKSPACE/adb_version.txt"
+            {
+              echo "BOOT_OK=1"
+              echo "SERIAL=$(adb get-serialno | tr -d '\r')"
+              echo "MODEL=$(adb shell getprop ro.product.model | tr -d '\r')"
+              echo "ANDROID=$(adb shell getprop ro.build.version.release | tr -d '\r')"
+              echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+              echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+              echo "ABILIST=$(adb shell getprop ro.product.cpu.abilist | tr -d '\r')"
+              echo "BOOT_COMPLETED=$(adb shell getprop sys.boot_completed | tr -d '\r')"
+              echo "TARGET=google_apis_playstore; API=30; ARCH=x86_64; PROFILE=pixel_5"
+            } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
+            # Últimas líneas de logcat (útil como smoke)
+            adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
 
-            # ABIs del dispositivo
-            adb shell getprop ro.product.cpu.abi > "$GITHUB_WORKSPACE/device_abi.txt" || true
-            adb shell getprop ro.product.cpu.abilist > "$GITHUB_WORKSPACE/device_abilist.txt" || true
-
-            # --- DESCARGA APK (ruta relativa al ROOT_FOLDER_ID) ---
-            mkdir -p "$RUNNER_TEMP/apk"; APK_PATH="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"; rclone copyto "gdrive:${GDRIVE_FILE_PATH}" "$APK_PATH" -P
-            test -f "$APK_PATH"
-            sha256sum "$APK_PATH" | tee "$GITHUB_WORKSPACE/apk.sha256"
-
-            # ABIs presentes en el APK (si tiene libs nativas)
-            ( command -v unzip >/dev/null 2>&1 && unzip -l "$APK_PATH" | awk '/^ +[0-9]+ +[0-9-]+ +[0-9:]+ +lib\/[^/]+\//{print $4}' | cut -d/ -f2 | sort -u ) \
-              > "$GITHUB_WORKSPACE/apk_abis.txt" || true
-
-            # --- INSTALACIÓN ---
-            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_before.txt"
-            adb install -r -d -t "$APK_PATH" 2>&1 | tee "$GITHUB_WORKSPACE/adb_install_output.txt" || true
-            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_after.txt"
-
-            # Paquete detectado por diff (si se instaló)
-            comm -13 "$GITHUB_WORKSPACE/pkgs_before.txt" "$GITHUB_WORKSPACE/pkgs_after.txt" | head -n1 | sed -E 's|.*/([^=]+)=.*|\1|' | tee "$GITHUB_WORKSPACE/new_package.txt" || true
-            PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$GITHUB_WORKSPACE/${PKG}_path.txt" || true
-
-            # Lanzar y screenshot (best effort)
-            PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
-            sleep 6
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/02-after-install.png" || true
-
-            # Appium + Behave (opcional; dejamos evidencia aunque no instale)
-            appium --log-level info > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
-            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 60 ] && break; sleep 1; done
-            mkdir -p "$GITHUB_WORKSPACE/allure-results"
-            behave -f allure_behave.formatter:AllureFormatter -o "$GITHUB_WORKSPACE/allure-results" -f pretty || true
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/03-after-tests.png" || true
-            pkill -f appium || true
-
-      - name: Validate evidence (fail if missing, explica motivo)
+      # 6) Validación mínima (falla si el emulador no booteó)
+      - name: Validate boot evidence
         run: |
           set -eu
-          # Mostrar log de instalación
-          echo "===== adb_install_output.txt ====="
-          ( test -f adb_install_output.txt && cat adb_install_output.txt ) || echo "(no existe)"
-          echo "===== apk_abis.txt (si hay) ====="
-          ( test -s apk_abis.txt && cat apk_abis.txt ) || echo "(no detectado)"
+          test -s env-versions.txt || (echo "Falta env-versions.txt" && exit 1)
+          test -s appium_doctor.txt || (echo "Falta appium_doctor.txt" && exit 1)
+          test -s adb_version.txt || (echo "Falta adb_version.txt" && exit 1)
+          grep -q "BOOT_OK=1" emulator-boot.log || (echo "Emulador no booteó correctamente" && exit 1)
+          echo "OK: entorno instalado y emulador booteado."
 
-          # Fallas específicas y mensaje claro
-          if ! grep -q "Success" adb_install_output.txt 2>/dev/null; then
-            if grep -qi "NO_MATCHING_ABIS" adb_install_output.txt 2>/dev/null; then
-              echo "ERROR: ABI incompatible (APK ABIs vs emulador x86_64)."
-              echo "Sugerencias:"
-              echo " - Cambiar el emulador a ARM: en el step del emulador usa: arch: arm64-v8a"
-              echo " - O compilar un APK universal que incluya x86/x86_64."
-            elif grep -qi "VERSION_DOWNGRADE" adb_install_output.txt 2>/dev/null; then
-              echo "ERROR: Version downgrade. Usé -d, pero igual falló. Desinstalar primero o subir versionCode."
-            elif grep -qi "UPDATE_INCOMPATIBLE" adb_install_output.txt 2>/dev/null; then
-              echo "ERROR: Firma/paquete incompatible con lo ya instalado. Probar: adb uninstall <package> antes."
-            elif grep -qi "INCOMPATIBLE" adb_install_output.txt 2>/dev/null; then
-              echo "ERROR: Incompatibilidad (revisar minSdk/target/abi)."
-            elif grep -qi "PARSE" adb_install_output.txt 2>/dev/null; then
-              echo "ERROR: APK corrupto o sin firmar (PARSE_FAILED)."
-            else
-              echo "ERROR: Instalación fallida. Revisa 'adb_install_output.txt'."
-            fi
-            exit 1
-          fi
-
-          # Evidencias mínimas
-          test -s apk.sha256 || (echo "Falta apk.sha256" && exit 1)
-          test -s 01-boot.png || (echo "Falta 01-boot.png" && exit 1)
-          test -s 02-after-install.png || (echo "Falta 02-after-install.png" && exit 1)
-          echo "Validación OK: boot, instalación y evidencias presentes"
-
-
-      # 6) Allure HTML opcional + artifacts
-      - name: Generate Allure HTML report
-        if: always()
-        run: |
-          set -euxo pipefail
-          if command -v allure >/dev/null 2>&1 && [ -d "allure-results" ] && [ "$(ls -A allure-results | wc -l)" -gt 0 ]; then
-            allure generate allure-results --clean -o allure-report || true
-            tar -czf allure-report.tar.gz -C allure-report .
-          else
-            echo "Allure CLI no disponible o sin resultados; omito HTML."
-          fi
-
-      - name: Upload artifacts (evidence)
+      # 7) Artefactos: descarga los logs para inspección local
+      - name: Upload artifacts (logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ui-mobile-evidence
+          name: env-and-emulator-logs
           path: |
-            appium_version.txt
+            env-versions.txt
             appium_doctor.txt
-            apk.sha256
-            adb_install_output.txt
-            pkgs_before.txt
-            pkgs_after.txt
-            new_package.txt
-            *_path.txt
-            appium.log
-            01-boot.png
-            02-after-install.png
-            03-after-tests.png
-            allure-results
-            allure-report.tar.gz
+            adb_version.txt
+            emulator-boot.log
+            logcat_tail.txt
