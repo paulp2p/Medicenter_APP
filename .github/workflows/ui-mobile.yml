@@ -51,8 +51,8 @@ jobs:
             done
           done
 
-    test -f browser.apk || (echo "No pude descargar un APK de navegador desde F-Droid ni su mirror" && exit 1)
-    ls -lh browser.apk
+          test -f browser.apk || (echo "No pude descargar un APK de navegador desde F-Droid ni su mirror" && exit 1)
+          ls -lh browser.apk
 
 
       # Arranca el emulador, instala el navegador, abre URL y toma captura.
