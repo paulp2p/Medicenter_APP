@@ -8,71 +8,66 @@ on:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest            # VM efímera hospedada por GitHub
-    timeout-minutes: 60               # Límite total del job
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      # 1) Trae el repo (aunque no usemos archivos, es buena práctica)
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Java para herramientas del SDK (adb/emulador lo requieren)
       - name: Set up Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # 3) Arranca el emulador, abre URL y toma una captura
+      # Esta acción a veces falla en "Terminate Emulator" aun cuando el script salió OK.
+      # Usamos continue-on-error y luego validamos la evidencia para decidir el estado real del job.
       - name: Boot emulator, open URL, screenshot
+        id: emulator
         uses: ReactiveCircus/android-emulator-runner@v2
+        continue-on-error: true
         with:
           api-level: 30
           target: google_apis
           arch: x86_64
           profile: pixel_5
           force-avd-creation: true
-          # Headless + sin snapshots para un arranque limpio y más rápido en CI
           emulator-options: >
-            -no-window -no-snapshot -no-boot-anim
+            -no-window
+            -no-boot-anim
+            -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
           disable-animations: true
           script: |
             adb wait-for-device
-
-            # Esperar a que Android termine de arrancar
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
-            # (Si existe) esperar fin de la animación de boot
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
             sleep 5
-
-            # Mantener pantalla encendida y descartar keyguard SIN usar "input"
             adb shell svc power stayon true || true
             adb shell settings put system screen_off_timeout 2147483647 || true
             adb shell wm dismiss-keyguard || true
-
-            # Abrir Google Argentina (si hay Chrome lo usamos; si no, intent genérico)
             if adb shell pm list packages | grep -q com.android.chrome; then
               adb shell am start -n com.android.chrome/com.google.android.apps.chrome.Main -d 'https://www.google.com.ar' || true
             else
               adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar' || true
             fi
-
-            # Dar tiempo a que cargue
             sleep 8
-
-            # Captura de pantalla -> workspace
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-screenshot.png"
-
-            # Info del dispositivo como evidencia
             {
               echo "MODEL: $(adb shell getprop ro.product.model)"
               echo "ANDROID: $(adb shell getprop ro.build.version.release) (SDK $(adb shell getprop ro.build.version.sdk))"
               echo "BOOT_COMPLETED: $(adb shell getprop sys.boot_completed)"
             } | tee "$GITHUB_WORKSPACE/adb-device-info.txt"
 
-      # 4) Sube la evidencia como artifact del job
+      # Verificación dura: si no hay evidencia, fallamos el job.
+      - name: Validate evidence
+        run: |
+          test -f emulator-screenshot.png || (echo "Missing screenshot" && exit 1)
+          test -s emulator-screenshot.png || (echo "Empty screenshot" && exit 1)
+          test -f adb-device-info.txt || (echo "Missing device info" && exit 1)
+
       - name: Upload artifacts (screenshot + device info)
         uses: actions/upload-artifact@v4
         with:
