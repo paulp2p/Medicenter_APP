@@ -26,19 +26,34 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update && sudo apt-get install -y jq curl
-          INDEX_URL="https://f-droid.org/repo/index-v1.json"
-          # Candidatos (ligeros → medianos). El primero que aparezca en el índice se usa.
-          for PKG in de.baumann.browser com.stoutner.privacybrowser.standard org.mozilla.fennec_fdroid; do
-            APK_NAME=$(curl -sL "$INDEX_URL" | jq -r --arg PKG "$PKG" '.packages[$PKG].versions[0].apkName // empty')
-            if [ -n "$APK_NAME" ]; then
-              echo "Elegido: $PKG ($APK_NAME)"
-              curl -L "https://f-droid.org/repo/${APK_NAME}" -o browser.apk
-              echo "BROWSER_PKG=$PKG" >> "$GITHUB_ENV"
-              break
-            fi
+
+          # Intentamos repo principal y mirror como fallback
+          for REPO in https://f-droid.org/repo https://mirror.f-droid.org/fdroid/repo; do
+            INDEX_URL="${REPO%/}/index-v1.json"
+            # Candidatos (ligeros → medianos)
+            for PKG in de.baumann.browser com.stoutner.privacybrowser.standard org.mozilla.fennec_fdroid; do
+              echo "Buscando $PKG en $INDEX_URL …"
+              APK_NAME=$(curl -sL "$INDEX_URL" | jq -r --arg PKG "$PKG" '
+                [ .packages[]?                                  # packages es un ARRAY
+                  | select(.packageName == $PKG)
+                  | .versions[]?                               # versiones disponibles
+                ]
+                | max_by(.versionCode // 0)                    # toma la versión más alta
+                | .apkName // empty
+              ')
+              if [ -n "$APK_NAME" ]; then
+                echo "Encontrado: $APK_NAME en $REPO"
+                curl -L "${REPO%/}/${APK_NAME}" -o browser.apk
+                echo "BROWSER_PKG=$PKG" >> "$GITHUB_ENV"
+                echo "REPO_USED=${REPO%/}" >> "$GITHUB_ENV"
+                break 2
+              fi
+            done
           done
-          test -f browser.apk || (echo "No pude descargar un APK de navegador desde F-Droid" && exit 1)
-          ls -lh browser.apk
+
+    test -f browser.apk || (echo "No pude descargar un APK de navegador desde F-Droid ni su mirror" && exit 1)
+    ls -lh browser.apk
+
 
       # Arranca el emulador, instala el navegador, abre URL y toma captura.
       # Nota: esta acción a veces falla en el teardown; toleramos el error y luego validamos evidencia.
