@@ -61,8 +61,8 @@ jobs:
               echo "TARGET=google_apis_playstore; API=30; ARCH=x86_64; PROFILE=pixel_5"
             } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
 
-      # Últimas líneas de logcat (como smoke)
-      adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
+            # Últimas líneas de logcat (como smoke)
+            adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
 
       # Validación: falla el job si el emu no booteó
       - name: Validate boot evidence
