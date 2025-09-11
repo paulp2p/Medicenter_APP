@@ -52,9 +52,25 @@ jobs:
         run: |
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
+      - name: Precheck Drive path (lsf + existe)
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}  # CI/medicenter_app.apk
+        run: |
+          set -eu
+          test -n "${GDRIVE_FILE_PATH:-}" || (echo "GDRIVE_FILE_PATH vacío" && exit 1)
+          echo "Listado de gdrive:CI/"
+          rclone lsf "gdrive:CI" || true
+          echo "Comprobando archivo exacto: gdrive:${GDRIVE_FILE_PATH}"
+          rclone lsf "gdrive:${GDRIVE_FILE_PATH}" >/dev/null || { echo "No existe ${GDRIVE_FILE_PATH} dentro del ROOT_FOLDER_ID"; exit 1; }
+
+
       # 5) Emulador → boot → (ahora) descargar APK → instalar → Appium → Behave → evidencias
       # --- EMULADOR + flujo completo ---
-      - name: Boot emulator, then download+install APK, then run tests
+      - name: Boot emulator, download + install APK, run tests
         uses: ReactiveCircus/android-emulator-runner@v2
         continue-on-error: true
         env:
@@ -62,11 +78,11 @@ jobs:
           RCLONE_CONFIG_GDRIVE_SCOPE: drive
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
           RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}  # CI/medicenter_app.apk
         with:
           api-level: 30
           target: google_apis
-          arch: x86_64              # si sale NO_MATCHING_ABIS, probar arm64-v8a
+          arch: x86_64         # si después marca ABI incompatible, probamos arm64-v8a
           profile: pixel_5
           force-avd-creation: true
           disable-animations: false
@@ -76,11 +92,8 @@ jobs:
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
           script: |
-            # /bin/sh: no usar pipefail; cada línea es un sh nuevo → no persisten variables
+            # /bin/sh (una línea = un shell): no persistir variables entre líneas
             set -eu
-
-            # --- Sanity de secreto de ruta ---
-            test -n "${GDRIVE_FILE_PATH:-}" || { echo "ERROR: GDRIVE_FILE_PATH vacío"; exit 1; }
 
             # --- BOOT + screenshot ---
             adb wait-for-device
@@ -88,27 +101,36 @@ jobs:
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/01-boot.png" || true
 
-            # --- DESCARGA APK ---
-            mkdir -p "$RUNNER_TEMP/apk"; APK_PATH="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"; rclone copyto "gdrive:${GDRIVE_FILE_PATH}" "$APK_PATH" -P; test -f "$APK_PATH"; sha256sum "$APK_PATH" | tee "$GITHUB_WORKSPACE/apk.sha256"
+            # ABIs del dispositivo
+            adb shell getprop ro.product.cpu.abi > "$GITHUB_WORKSPACE/device_abi.txt" || true
+            adb shell getprop ro.product.cpu.abilist > "$GITHUB_WORKSPACE/device_abilist.txt" || true
 
-            # ABIs detectadas en el APK (si es .apk normal)
-            ( command -v unzip >/dev/null 2>&1 && unzip -l "$APK_PATH" | awk '/lib\/[^/]+\//{print $4}' | cut -d/ -f2 | sort -u ) > "$GITHUB_WORKSPACE/apk_abis.txt" || true
+            # --- DESCARGA APK (ruta relativa al ROOT_FOLDER_ID) ---
+            mkdir -p "$RUNNER_TEMP/apk"; APK_PATH="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"; rclone copyto "gdrive:${GDRIVE_FILE_PATH}" "$APK_PATH" -P
+            test -f "$APK_PATH"
+            sha256sum "$APK_PATH" | tee "$GITHUB_WORKSPACE/apk.sha256"
 
-            # --- INSTALACIÓN + evidencias ---
+            # ABIs presentes en el APK (si tiene libs nativas)
+            ( command -v unzip >/dev/null 2>&1 && unzip -l "$APK_PATH" | awk '/^ +[0-9]+ +[0-9-]+ +[0-9:]+ +lib\/[^/]+\//{print $4}' | cut -d/ -f2 | sort -u ) \
+              > "$GITHUB_WORKSPACE/apk_abis.txt" || true
+
+            # --- INSTALACIÓN ---
             adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_before.txt"
-            adb install -r -d -t "$APK_PATH" | tee "$GITHUB_WORKSPACE/adb_install_output.txt" || true
+            adb install -r -d -t "$APK_PATH" 2>&1 | tee "$GITHUB_WORKSPACE/adb_install_output.txt" || true
             adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_after.txt"
+
+            # Paquete detectado por diff (si se instaló)
             comm -13 "$GITHUB_WORKSPACE/pkgs_before.txt" "$GITHUB_WORKSPACE/pkgs_after.txt" | head -n1 | sed -E 's|.*/([^=]+)=.*|\1|' | tee "$GITHUB_WORKSPACE/new_package.txt" || true
             PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$GITHUB_WORKSPACE/${PKG}_path.txt" || true
 
-            # Intento de abrir y screenshot
+            # Lanzar y screenshot (best effort)
             PKG="$(cat "$GITHUB_WORKSPACE/new_package.txt" 2>/dev/null || true)"; [ -n "$PKG" ] && adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
             sleep 6
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/02-after-install.png" || true
 
-            # --- Appium + Behave (best-effort para dejar evidencias aunque la instalación falle) ---
+            # Appium + Behave (opcional; dejamos evidencia aunque no instale)
             appium --log-level info > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
-            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 60 ] && { echo "Appium no levantó"; break; }; sleep 1; done
+            i=0; while ! (echo > /dev/tcp/127.0.0.1/4723) 2>/dev/null; do i=$((i+1)); [ $i -ge 60 ] && break; sleep 1; done
             mkdir -p "$GITHUB_WORKSPACE/allure-results"
             behave -f allure_behave.formatter:AllureFormatter -o "$GITHUB_WORKSPACE/allure-results" -f pretty || true
             adb exec-out screencap -p > "$GITHUB_WORKSPACE/03-after-tests.png" || true
