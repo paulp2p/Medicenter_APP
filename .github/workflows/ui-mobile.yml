@@ -1,13 +1,97 @@
-name: Android emulator smoke (install browser + screenshot)
+name: APK download + install smoke
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/android-smoke.yml'
 
 jobs:
-  smoke:
+  # --- JOB 1: descarga desde Drive y publica la APK como artifact ---
+  download-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      # Debug opcional del root de Drive
+      - name: Debug Drive root (lsf)
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+        run: |
+          set -euo pipefail
+          echo "Listando raíz (gdrive:)"
+          rclone lsf "gdrive:" --dirs-only || true
+          echo "------"
+          SUBDIR="$(dirname "${GDRIVE_FILE_PATH}")"
+          if [ "$SUBDIR" != "." ]; then
+            echo "Listando subcarpeta gdrive:$SUBDIR"
+            rclone lsf "gdrive:$SUBDIR" || true
+          fi
+
+      # Descarga estricta
+      - name: Download APK from Drive (rclone + SA, path, strict)
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/apk"
+          SRC="gdrive:${GDRIVE_FILE_PATH}"
+          DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
+          echo "Copiando: $SRC -> $DEST"
+          rclone copyto "$SRC" "$DEST" -P
+          test -f "$DEST"
+          echo "APP_PATH=$DEST" >> "$GITHUB_ENV"
+          ls -lh "$DEST"
+          sha256sum "$DEST" | tee apk.sha256
+
+      - name: Save hash and metadata (robusto)
+        if: always()
+        run: |
+          set -euo pipefail
+          : > apk_info.txt
+          if [ -n "${APP_PATH:-}" ] && [ -f "${APP_PATH:-}" ]; then
+            echo "File: $(basename "${APP_PATH}")" >> apk_info.txt
+            echo "Path: ${APP_PATH}" >> apk_info.txt
+            echo "Size (bytes): $(stat -c%s "${APP_PATH}")" >> apk_info.txt
+            [ -f apk.sha256 ] || sha256sum "${APP_PATH}" | tee apk.sha256
+            cat apk.sha256 >> apk_info.txt
+          else
+            echo "APP_PATH no disponible (descarga fallida o ruta incorrecta)." >> apk_info.txt
+            echo "NO_HASH" > apk.sha256
+          fi
+          cat apk_info.txt
+
+      # >>> NUEVO: publicar la APK para el siguiente job <<<
+      - name: Upload APK file
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-apk
+          path: ${{ env.APP_PATH }}
+
+      - name: Upload proof (hash + info)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-proof
+          path: |
+            apk.sha256
+            apk_info.txt
+
+  # --- JOB 2: arranca emulador, instala APK, la abre y sube evidencia ---
+  install-apk:
+    needs: download-apk
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -21,43 +105,22 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Descarga un navegador FOSS desde F-Droid de forma dinámica (elige el primero disponible)
-      - name: Download lightweight browser APK (F-Droid)
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: downloaded-apk
+          path: ${{ github.workspace }}/apk
+
+      - name: Verify APK presence
         run: |
-          set -euxo pipefail
-          sudo apt-get update && sudo apt-get install -y jq curl
+          set -euo pipefail
+          test -f apk/*.apk || (echo "APK artifact missing" && ls -R && exit 1)
+          APK_PATH="$(ls -1 apk/*.apk | head -n1)"
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "Usando: $APK_PATH"
 
-          # Intentamos repo principal y mirror como fallback
-          for REPO in https://f-droid.org/repo https://mirror.f-droid.org/fdroid/repo; do
-            INDEX_URL="${REPO%/}/index-v1.json"
-            # Candidatos (ligeros → medianos)
-            for PKG in de.baumann.browser com.stoutner.privacybrowser.standard org.mozilla.fennec_fdroid; do
-              echo "Buscando $PKG en $INDEX_URL …"
-              APK_NAME=$(curl -sL "$INDEX_URL" | jq -r --arg PKG "$PKG" '
-                [ .packages[]?                                  # packages es un ARRAY
-                  | select(.packageName == $PKG)
-                  | .versions[]?                               # versiones disponibles
-                ]
-                | max_by(.versionCode // 0)                    # toma la versión más alta
-                | .apkName // empty
-              ')
-              if [ -n "$APK_NAME" ]; then
-                echo "Encontrado: $APK_NAME en $REPO"
-                curl -L "${REPO%/}/${APK_NAME}" -o browser.apk
-                echo "BROWSER_PKG=$PKG" >> "$GITHUB_ENV"
-                echo "REPO_USED=${REPO%/}" >> "$GITHUB_ENV"
-                break 2
-              fi
-            done
-          done
-
-          test -f browser.apk || (echo "No pude descargar un APK de navegador desde F-Droid ni su mirror" && exit 1)
-          ls -lh browser.apk
-
-
-      # Arranca el emulador, instala el navegador, abre URL y toma captura.
-      # Nota: esta acción a veces falla en el teardown; toleramos el error y luego validamos evidencia.
-      - name: Boot emulator, install browser, open URL, screenshot
+      # El action a veces falla al apagar el emulador; toleramos y validamos luego.
+      - name: Boot emulator, install APK, launch, screenshot
         id: emulator
         uses: ReactiveCircus/android-emulator-runner@v2
         continue-on-error: true
@@ -73,63 +136,69 @@ jobs:
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
-          # Evitamos el crash interno en "Disable animations"
-          disable-animations: false
+          disable-animations: false   # evitamos crash interno
           script: |
             set -euxo pipefail
-            adb wait-for-device
+            APK="$APK_PATH"
 
-            # Esperar arranque completo
+            adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
             sleep 5
 
-            # Mantener pantalla encendida y quitar keyguard (sin usar input)
+            # Evitar suspensión / lockscreen (sin usar "input")
             adb shell svc power stayon true || true
             adb shell settings put system screen_off_timeout 2147483647 || true
             adb shell wm dismiss-keyguard || true
 
-            # Deshabilitar animaciones (si falla, no rompemos)
+            # Desactivar animaciones (no crítico si falla)
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
 
-            # Instalar el navegador descargado
-            adb install -r "$GITHUB_WORKSPACE/browser.apk"
+            # Baseline de paquetes instalados
+            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_before.txt"
 
-            # Resolver el activity exacto que maneja VIEW para https:// (evita el chooser)
-            COMP=$(adb shell cmd package resolve-activity --brief -a android.intent.action.VIEW -d 'https://www.google.com.ar' | tail -n 1 | tr -d '\r')
-            echo "Componente resuelto: $COMP"
+            # Instalar APK (guardamos salida)
+            adb install -r "$APK" | tee "$GITHUB_WORKSPACE/adb_install_output.txt"
 
-            # Abrir la URL con el componente resuelto; si falla, intento genérico
-            adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar' -n "$COMP" \
-              || adb shell am start -a android.intent.action.VIEW -d 'https://www.google.com.ar' || true
+            # Detectar paquete nuevo por diff
+            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_after.txt"
+            NEWLINE="$(comm -13 "$GITHUB_WORKSPACE/pkgs_before.txt" "$GITHUB_WORKSPACE/pkgs_after.txt" | head -n1 || true)"
+            PKG="$(echo "$NEWLINE" | sed -E 's|.*/([^=]+)=.*|\1|' || true)"
+            echo "PKG=$PKG" | tee "$GITHUB_WORKSPACE/new_package.txt"
 
-            # Dar tiempo a que cargue
-            sleep 10
+            # Evidencia adicional
+            if [ -n "$PKG" ]; then
+              adb shell pm path "$PKG" | tee "$GITHUB_WORKSPACE/${PKG}_path.txt" || true
+              adb shell dumpsys package "$PKG" > "$GITHUB_WORKSPACE/dumpsys_${PKG}.txt" || true
+              # Intentar abrir la app
+              adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
+            fi
 
-            # Captura + metadata
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-screenshot.png"
-            {
-              echo "MODEL: $(adb shell getprop ro.product.model)"
-              echo "ANDROID: $(adb shell getprop ro.build.version.release) (SDK $(adb shell getprop ro.build.version.sdk))"
-              echo "BOOT_COMPLETED: $(adb shell getprop sys.boot_completed)"
-              echo "Browser pkg: ${BROWSER_PKG:-unknown}"
-              echo "Resolved component: $COMP"
-              adb shell pm list packages | egrep 'chrome|browser|fennec|privacy|baumann' || true
-            } | tee "$GITHUB_WORKSPACE/adb-device-info.txt"
+            # Esperar y tomar captura
+            sleep 8
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/app-screenshot.png"
 
-      # Verificación dura: si no hay evidencia, rompemos el job con un mensaje claro
-      - name: Validate evidence
+      # Verificación dura: instalación correcta y evidencia presente
+      - name: Validate installation evidence
         run: |
-          test -f emulator-screenshot.png || (echo "Missing screenshot" && exit 1)
-          test -s emulator-screenshot.png || (echo "Empty screenshot" && exit 1)
-          test -f adb-device-info.txt || (echo "Missing device info" && exit 1)
+          set -euo pipefail
+          test -f app-screenshot.png || (echo "Missing screenshot" && exit 1)
+          grep -q "Success" adb_install_output.txt || (echo "adb install no devolvió 'Success'" && exit 1)
+          echo "OK: screenshot + install Success"
+          echo "Paquete detectado (si aplica):"
+          cat new_package.txt || true
 
-      - name: Upload artifacts (screenshot + device info)
+      - name: Upload installation artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: emulator-evidence
+          name: install-evidence
           path: |
-            emulator-screenshot.png
-            adb-device-info.txt
+            app-screenshot.png
+            adb_install_output.txt
+            pkgs_before.txt
+            pkgs_after.txt
+            new_package.txt
+            *_path.txt
+            dumpsys_*.txt
