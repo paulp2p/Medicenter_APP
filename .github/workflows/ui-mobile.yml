@@ -1,17 +1,19 @@
-name: Android CI (env | boot | install | tests)
+name: UI Mobile — env + emulator + download + install + tests
 
 on:
   workflow_dispatch:
 
 jobs:
-  # 1) Toolchain básico y validación
-  env-setup:
+  ui-mobile:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120
+
     steps:
+      # 1) Código del repo (features/steps/utils/etc.)
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2) Toolchain del SO (Java, Node, Python)
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -28,107 +30,39 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Appium & Doctor
+      # 3) Appium + plugins y dependencias Python de tests
+      - name: Install Appium & test deps
         run: |
           set -euxo pipefail
-          npm i -g appium @appium/doctor
+          npm i -g appium @appium/doctor allure-commandline --no-audit --no-fund
           appium -v | tee appium_version.txt
+          # Appium 2 requiere instalar el driver explícitamente
+          appium driver install uiautomator2
           appium-doctor --android | tee appium_doctor.txt
 
-      - name: Upload env evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: env-proof
-          path: |
-            appium_version.txt
-            appium_doctor.txt
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install appium-python-client behave allure-behave requests
+          fi
 
-  # 2) Smoke de emulador (solo boot + screenshot)
-  emulator-boot:
-    needs: env-setup
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Boot emulator (API 30) and screenshot
-        id: boot_only
-        uses: ReactiveCircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          force-avd-creation: true
-          disable-animations: false
-          emulator-options: >
-            -no-window -no-boot-anim
-            -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
-            -gpu swiftshader_indirect
-            -camera-back none -camera-front none
-          script: |
-            set -euxo pipefail
-            adb wait-for-device
-            until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
-            adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-            sleep 5
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/emulator-boot.png"
-            adb shell getprop ro.build.version.release > "$GITHUB_WORKSPACE/android_version.txt"
-
-      - name: Upload boot evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: emulator-boot-evidence
-          path: |
-            emulator-boot.png
-            android_version.txt
-
-  # 3) Descarga APK de Drive e INSTALA en emulador (evidencia)
-  apk-download-install:
-    needs: env-setup
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    env:
-      RCLONE_CONFIG_GDRIVE_TYPE: drive
-      RCLONE_CONFIG_GDRIVE_SCOPE: drive
-      RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
-      RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
-      GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      # 4) rclone (lo usaremos más abajo, DENTRO del step del emulador)
       - name: Install rclone
         run: |
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
-      - name: Download APK (strict) from Drive
-        run: |
-          set -euxo pipefail
-          mkdir -p "$RUNNER_TEMP/apk"
-          SRC="gdrive:${GDRIVE_FILE_PATH}"
-          DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
-          rclone copyto "$SRC" "$DEST" -P
-          test -f "$DEST"
-          echo "APK_PATH=$DEST" >> "$GITHUB_ENV"
-          sha256sum "$DEST" | tee apk.sha256
-          ls -lh "$DEST"
-
-      - name: Upload APK artifact (for tests job too)
-        uses: actions/upload-artifact@v4
-        with:
-          name: downloaded-apk
-          path: ${{ env.APK_PATH }}
-
-      - name: Boot emulator + install APK + screenshot
+      # 5) Emulador → boot → (ahora) descargar APK → instalar → Appium → Behave → evidencias
+      - name: Boot emulator, then download+install APK, then run tests
         uses: ReactiveCircus/android-emulator-runner@v2
+        continue-on-error: true   # el teardown del emulador a veces devuelve error; validamos nosotros
+        env:
+          # Secrets de Drive para rclone DENTRO del script
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+          GDRIVE_FILE_PATH: ${{ secrets.GDRIVE_FILE_PATH }}
         with:
           api-level: 30
           target: google_apis
@@ -143,131 +77,97 @@ jobs:
             -camera-back none -camera-front none
           script: |
             set -euxo pipefail
-            APK="$APK_PATH"
+            WORK="$GITHUB_WORKSPACE"
+
+            # --- EMULADOR: BOOT ---
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-            sleep 5
+            # Mantener pantalla / quitar keyguard / desactivar animaciones (sin romper si falla)
+            adb shell svc power stayon true || true
+            adb shell settings put system screen_off_timeout 2147483647 || true
+            adb shell wm dismiss-keyguard || true
+            adb shell settings put global window_animation_scale 0 || true
+            adb shell settings put global transition_animation_scale 0 || true
+            adb shell settings put global animator_duration_scale 0 || true
 
-            # Instalar y evidenciar
-            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_before.txt"
-            adb install -r "$APK" | tee "$GITHUB_WORKSPACE/adb_install_output.txt"
-            adb shell pm list packages -f | sort > "$GITHUB_WORKSPACE/pkgs_after.txt"
-            NEWLINE="$(comm -13 "$GITHUB_WORKSPACE/pkgs_before.txt" "$GITHUB_WORKSPACE/pkgs_after.txt" | head -n1 || true)"
+            # Screenshot del boot (evidencia)
+            adb exec-out screencap -p > "$WORK/01-boot.png" || true
+
+            # --- DESCARGA APK (ahora que el emulador YA está listo, como pediste) ---
+            mkdir -p "$RUNNER_TEMP/apk"
+            SRC="gdrive:${GDRIVE_FILE_PATH}"
+            DEST="$RUNNER_TEMP/apk/$(basename "${GDRIVE_FILE_PATH}")"
+            rclone copyto "$SRC" "$DEST" -P
+            test -f "$DEST"
+            APK="$DEST"
+            sha256sum "$APK" | tee "$WORK/apk.sha256"
+
+            # --- INSTALACIÓN APK ---
+            adb shell pm list packages -f | sort > "$WORK/pkgs_before.txt"
+            adb install -r "$APK" | tee "$WORK/adb_install_output.txt"
+            grep -q "Success" "$WORK/adb_install_output.txt" || { echo "Instalación fallida"; exit 1; }
+
+            adb shell pm list packages -f | sort > "$WORK/pkgs_after.txt"
+            NEWLINE="$(comm -13 "$WORK/pkgs_before.txt" "$WORK/pkgs_after.txt" | head -n1 || true)"
             PKG="$(echo "$NEWLINE" | sed -E 's|.*/([^=]+)=.*|\1|' || true)"
-            echo "PKG=$PKG" | tee "$GITHUB_WORKSPACE/new_package.txt"
+            echo "PKG=$PKG" | tee "$WORK/new_package.txt"
+            [ -n "$PKG" ] && adb shell pm path "$PKG" | tee "$WORK/${PKG}_path.txt" || true
 
-            # Intento de lanzamiento (opcional)
+            # Abrir la app (best-effort) y screenshot
             if [ -n "$PKG" ]; then
               adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 || true
             fi
-
             sleep 6
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/install-screenshot.png"
+            adb exec-out screencap -p > "$WORK/02-after-install.png" || true
 
-            # Validación fuerte
-            grep -q "Success" "$GITHUB_WORKSPACE/adb_install_output.txt"
-
-      - name: Upload install evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-install-evidence
-          path: |
-            apk.sha256
-            adb_install_output.txt
-            pkgs_before.txt
-            pkgs_after.txt
-            new_package.txt
-            install-screenshot.png
-
-  # 4) Ejecuta casos (Behave) + Appium + Allure
-  run-tests:
-    needs: [env-setup, apk-download-install]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout (tests & code)
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Node 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Appium server + Python deps
-        run: |
-          set -euxo pipefail
-          npm i -g appium @appium/doctor
-          python -m pip install --upgrade pip
-          # Ajustá según tu proyecto:
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install appium-python-client behave allure-behave
-          fi
-
-      - name: Download APK artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: downloaded-apk
-          path: ${{ github.workspace }}/apk
-
-      - name: Boot emulator + install + run Behave + collect Allure
-        uses: ReactiveCircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          force-avd-creation: true
-          disable-animations: false
-          emulator-options: >
-            -no-window -no-boot-anim
-            -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
-            -gpu swiftshader_indirect
-            -camera-back none -camera-front none
-          script: |
-            set -euxo pipefail
-            APK_PATH="$(ls -1 "$GITHUB_WORKSPACE"/apk/*.apk | head -n1)"
-            adb wait-for-device
-            until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
-            adb install -r "$APK_PATH" | tee "$GITHUB_WORKSPACE/adb_install_tests.txt"
-
-            # Iniciar Appium y esperar puerto 4723
-            appium --log-level error > "$GITHUB_WORKSPACE/appium.log" 2>&1 &
+            # --- APPIUM + TESTS (Behave) ---
+            appium --log-level info > "$WORK/appium.log" 2>&1 &
+            # Esperar puerto 4723
             for i in $(seq 1 90); do
               (echo > /dev/tcp/127.0.0.1/4723) >/dev/null 2>&1 && break || sleep 1
               [ "$i" -eq 90 ] && echo "Appium no levantó" && exit 1
             done
 
-            # Ejecutar Behave con Allure (ajustá rutas si es necesario)
-            mkdir -p "$GITHUB_WORKSPACE/allure-results"
-            behave -f allure_behave.formatter:AllureFormatter -o "$GITHUB_WORKSPACE/allure-results" -f pretty || true
+            mkdir -p "$WORK/allure-results"
+            # Ejecuta tus features; ajusta tags/paths si hace falta
+            behave -f allure_behave.formatter:AllureFormatter -o "$WORK/allure-results" -f pretty || true
 
-            # Screenshot final como evidencia
-            adb exec-out screencap -p > "$GITHUB_WORKSPACE/tests-screenshot.png"
+            # Screenshot final
+            adb exec-out screencap -p > "$WORK/03-after-tests.png" || true
 
-            # Apagar Appium
+            # Cerrar Appium
             pkill -f appium || true
 
-      - name: Upload test artifacts (Allure + logs)
+      # 6) Allure HTML opcional + artifacts
+      - name: Generate Allure HTML report
+        if: always()
+        run: |
+          set -euxo pipefail
+          if command -v allure >/dev/null 2>&1 && [ -d "allure-results" ] && [ "$(ls -A allure-results | wc -l)" -gt 0 ]; then
+            allure generate allure-results --clean -o allure-report || true
+            tar -czf allure-report.tar.gz -C allure-report .
+          else
+            echo "Allure CLI no disponible o sin resultados; omito HTML."
+          fi
+
+      - name: Upload artifacts (evidence)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-evidence
+          name: ui-mobile-evidence
           path: |
-            allure-results
+            appium_version.txt
+            appium_doctor.txt
+            apk.sha256
+            adb_install_output.txt
+            pkgs_before.txt
+            pkgs_after.txt
+            new_package.txt
+            *_path.txt
             appium.log
-            adb_install_tests.txt
-            tests-screenshot.png
+            01-boot.png
+            02-after-install.png
+            03-after-tests.png
+            allure-results
+            allure-report.tar.gz
