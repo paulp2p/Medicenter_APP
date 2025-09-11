@@ -6,7 +6,7 @@ on:
 jobs:
   screenshot:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -16,7 +16,7 @@ jobs:
         uses: ReactiveCircus/android-emulator-runner@v2
         continue-on-error: true
         with:
-          api-level: 34
+          api-level: 30
           target: google_apis
           arch: arm64-v8a
           profile: pixel_7
@@ -38,7 +38,7 @@ jobs:
             done
 
             # Abrir una URL (navegador del emulador)
-            URL="https://example.org"
+            URL="https:www.google.com"
             adb shell am start -a android.intent.action.VIEW -d "$URL" || true
             sleep 8
 
@@ -61,7 +61,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-screenshot
-          retention-days: 7
+          retention-days: 1
           path: |
             screenshot.png
             logcat.txt
