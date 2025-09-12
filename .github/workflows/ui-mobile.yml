@@ -1,4 +1,4 @@
-name: Emulator smoke • Ubuntu x86_64 (robusto)
+name: Emulator smoke (ADB port fix)
 
 on:
   push:
@@ -11,23 +11,27 @@ concurrency:
 
 jobs:
   emulator-only:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+    runs-on: ubuntu-latest      # macOS: usa macos-14 y arch: arm64-v8a
+    timeout-minutes: 60
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
 
-      - name: Boot emulator (API 30 • x86_64 no-accel) and collect logs
+      - name: Boot emulator (API 30) and collect logs
         uses: ReactiveCircus/android-emulator-runner@v2
         continue-on-error: true
+        env:
+          # >>> clave: evitar el 5037 que a veces queda colgado
+          ADB_SERVER_PORT: 5038
         with:
           api-level: 30
-          target: google_apis
-          arch: x86_64
+          target: google_apis              # (en macOS puedes subir a api-level: 33)
+          arch: x86_64                     # macOS: arch: arm64-v8a
           profile: pixel_5
           force-avd-creation: true
-          emulator-boot-timeout: 1800000          # 30 min si descarga imagen
+          emulator-boot-timeout: 1800000   # 30 min si descarga imagen
           cores: 2
           ram-size: 2048
           heap-size: 384
@@ -35,39 +39,52 @@ jobs:
           emulator-options: >
             -no-window -no-boot-anim -no-audio
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
-            -accel off                      # ← fuerza sin KVM, más confiable
+            -accel off                      # estable en Ubuntu CI
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
             -verbose
           disable-animations: false
           script: |
             set -eu
-            echo "SCRIPT_STARTED=1" > "$GITHUB_WORKSPACE/emulator-script.log"
+            # ADB a puerto propio y server limpio
+            adb kill-server || true
+            adb start-server
+            adb version | tee "$GITHUB_WORKSPACE/adb_version.txt"
+
+            # Esperar emulador y boot real
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
+
+            # Evidencia
             {
               echo "BOOT_OK=1"
-              echo "MODEL=$(adb shell getprop ro.product.model)"
-              echo "ANDROID=$(adb shell getprop ro.build.version.release)"
-              echo "SDK=$(adb shell getprop ro.build.version.sdk)"
-              echo "ABI=$(adb shell getprop ro.product.cpu.abi)"
-              echo "TARGET=google_apis; API=30; ARCH=x86_64"
+              echo "SERIAL=$(adb get-serialno | tr -d '\r')"
+              echo "MODEL=$(adb shell getprop ro.product.model | tr -d '\r')"
+              echo "ANDROID=$(adb shell getprop ro.build.version.release | tr -d '\r')"
+              echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+              echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+              echo "ABILIST=$(adb shell getprop ro.product.cpu.abilist | tr -d '\r')"
+              echo "ADB_PORT=$ADB_SERVER_PORT"
             } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
-            adb logcat -d -t 150 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
+
+            adb devices -l | tee "$GITHUB_WORKSPACE/adb_devices.txt" || true
+            adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
 
       - name: Validate boot
         run: |
           set -eu
-          [ -s emulator-script.log ] || { echo "El action nunca llegó a ejecutar script (timeout antes del boot)."; exit 1; }
-          [ -s emulator-boot.log ] || { echo "Sin emulator-boot.log"; exit 1; }
-          grep -q "BOOT_OK=1" emulator-boot.log || { echo "No hubo boot completo"; exit 1; }
-          echo "OK: emulador x86_64 booteado en Ubuntu."
+          test -s adb_version.txt || (echo "Falta adb_version.txt" && exit 1)
+          test -s emulator-boot.log || (echo "Falta emulator-boot.log" && exit 1)
+          grep -q "BOOT_OK=1" emulator-boot.log || (echo "No hubo boot completo" && exit 1)
+          echo "OK: emulador booteado con ADB en puerto alternativo."
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: emulator-logs-ubuntu
+          name: emulator-logs
           path: |
-            emulator-script.log
+            adb_version.txt
+            adb_devices.txt
             emulator-boot.log
             logcat_tail.txt
