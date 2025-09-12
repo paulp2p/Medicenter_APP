@@ -1,66 +1,36 @@
-name: Android emulator smoke (manual SDK + AVD)
-
-on: [push, pull_request, workflow_dispatch]
-
-concurrency:
-  group: emulator-manual-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   emulator-only:
     runs-on: ubuntu-latest
     timeout-minutes: 40
-
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd   # <- AVD fijo
 
     steps:
-      - uses: actions/checkout@v4
+      # (cmdline-tools igual que ya tienes)
 
-      - name: Set up Java 17 (for sdkmanager/avdmanager)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      # 1) Instalar cmdline-tools (rutas ABSOLUTAS)
-      - name: Install Android cmdline-tools
-        run: |
-          set -eux
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-          curl -sSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          rm -f cmdline-tools.zip
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --version
-          # Para steps siguientes (opcional)
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-
-      # 2) Paquetes mínimos del SDK
       - name: Install SDK packages
         run: |
           set -eux
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "platform-tools" \
-            "emulator" \
-            "platforms;android-30" \
+            "platform-tools" "emulator" "platforms;android-30" \
             "system-images;android-30;google_apis;x86_64"
-          # Para steps siguientes (opcional)
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/emulator"       >> "$GITHUB_PATH"
 
-      # 3) Crear AVD
       - name: Create AVD (Pixel 5 • API 30 • google_apis x86_64)
         run: |
           set -eux
+          mkdir -p "$ANDROID_AVD_HOME"
           echo "no" | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/avdmanager" \
             create avd -n ci_api30 \
             -k "system-images;android-30;google_apis;x86_64" \
             -d pixel_5 --force
           "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/avdmanager" list avd || true
+          ls -la "$ANDROID_AVD_HOME"
+          test -f "$ANDROID_AVD_HOME/ci_api30.ini"  # <- falla aquí si no se creó
 
-      # 4) Boot del emulador + evidencias (todo con rutas ABSOLUTAS)
       - name: Boot emulator and collect logs
         shell: bash
         run: |
@@ -68,15 +38,17 @@ jobs:
           SDK="$ANDROID_SDK_ROOT"
           ADB="$SDK/platform-tools/adb"
           EMU="$SDK/emulator/emulator"
+          AVD_DIR="$ANDROID_AVD_HOME"
+          SERIAL="emulator-5554"
+          CONSOLE_PORT=5554
 
-          # ADB limpio
+          # sanity: el .ini debe existir donde vamos a buscar
+          test -f "$AVD_DIR/ci_api30.ini"
+
           $ADB kill-server || true
           $ADB start-server
           $ADB devices -l || true
 
-          # Lanzar emulador en background
-          CONSOLE_PORT=5554
-          SERIAL="emulator-${CONSOLE_PORT}"
           "$EMU" -avd ci_api30 -port ${CONSOLE_PORT} \
             -no-window -no-boot-anim -no-audio \
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data \
@@ -87,28 +59,19 @@ jobs:
           EMU_PID=$!
           echo "EMU_PID=$EMU_PID"
 
-          # ---- ESPERAR A QUE APAREZCA EL DISPOSITIVO EN ADB ----
-          SEEN=""
-          for i in $(seq 1 300); do   # ~10 min
-            if $ADB devices | awk 'NR>1{print $1,$2}' | grep -q "^${SERIAL} device$"; then
-              SEEN="yes"; break
-            fi
-            # si el proceso murió, volcamos logs y fallamos claro
+          # Esperar a que aparezca el serial en adb devices
+          for i in $(seq 1 300); do
+            if $ADB devices | awk 'NR>1{print $1,$2}' | grep -q "^${SERIAL} device$"; then break; fi
             if ! kill -0 "$EMU_PID" 2>/dev/null; then
-              echo "El proceso del emulador terminó antes de registrarse en ADB."
-              tail -n +1 emulator_stdout.log | head -n 300
-              exit 1
+              echo "El emulador murió antes de registrarse en ADB"; head -n 300 emulator_stdout.log; exit 1
             fi
             sleep 2
           done
-          [ -n "$SEEN" ] || { echo "Timeout esperando ${SERIAL} en 'adb devices'"; tail -n 200 emulator_stdout.log; exit 1; }
 
-          # A partir de acá YA hay device -> ahora sí usamos shell/getprop
           $ADB -s "$SERIAL" wait-for-device
           timeout 900 bash -c 'until '"$ADB"' -s '"$SERIAL"' shell getprop sys.boot_completed | grep -qm1 1; do sleep 2; done'
           $ADB -s "$SERIAL" shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
 
-          # Evidencias
           $ADB version | tee adb_version.txt
           {
             echo "BOOT_OK=1"
@@ -121,25 +84,5 @@ jobs:
           $ADB devices -l | tee adb_devices_after.txt
           $ADB -s "$SERIAL" logcat -d -t 200 > logcat_tail.txt || true
 
-          # Apagado suave (no crítico si falla)
           $ADB -s "$SERIAL" emu kill || true
           timeout 30 tail --pid="$EMU_PID" -f /dev/null || true
-
-            - name: Validate boot evidence
-              run: |
-                set -eu
-                test -s emulator-boot.log
-                grep -q "BOOT_OK=1" emulator-boot.log
-                echo "OK: emulador booteado (manual) y ADB operativo."
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: emulator-manual-logs
-          path: |
-            adb_version.txt
-            adb_devices_after.txt
-            emulator-boot.log
-            emulator_stdout.log
-            logcat_tail.txt
