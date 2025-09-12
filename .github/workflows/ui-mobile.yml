@@ -1,9 +1,6 @@
 name: Android emulator smoke (manual SDK + AVD)
 
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
+on: [push, pull_request, workflow_dispatch]
 
 concurrency:
   group: emulator-manual-${{ github.ref }}
@@ -13,43 +10,39 @@ jobs:
   emulator-only:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-      PATH: ${{ github.workspace }}/android-sdk/platform-tools:${{ github.workspace }}/android-sdk/emulator:${{ github.workspace }}/android-sdk/cmdline-tools/latest/bin:${{ env.PATH }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java 17 (required by sdkmanager/avdmanager)
+      - name: Set up Java 17 (for sdkmanager/avdmanager)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 1) Instalar SDK cmdline-tools local (sin depender del preinstalado del runner)
+      # 1) Instalar cmdline-tools y ponerlos en PATH con $GITHUB_PATH
       - name: Install Android cmdline-tools
         run: |
           set -eux
-          mkdir -p "$ANDROID_SDK_ROOT"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -sSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT"
-          # Reubicar al layout esperado: cmdline-tools/latest/...
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          mv "$ANDROID_SDK_ROOT/cmdline-tools/"* "$ANDROID_SDK_ROOT/cmdline-tools/latest/" || true
+          unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           rm -f cmdline-tools.zip
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           sdkmanager --version
 
-      # 2) Aceptar licencias e instalar paquetes mínimos + imagen del sistema
-      - name: Install SDK packages (platform-tools, emulator, API 30 x86_64)
+      # 2) Paquetes mínimos + PATH para adb/emulator
+      - name: Install SDK packages
         run: |
           set -eux
           yes | sdkmanager --licenses
-          yes | sdkmanager \
-            "platform-tools" \
-            "emulator" \
-            "platforms;android-30" \
-            "system-images;android-30;google_apis;x86_64"
+          yes | sdkmanager "platform-tools" "emulator" "platforms;android-30" "system-images;android-30;google_apis;x86_64"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
 
       # 3) Crear AVD limpio
       - name: Create AVD (Pixel 5 • API 30 • google_apis x86_64)
@@ -58,62 +51,44 @@ jobs:
           echo "no" | avdmanager create avd -n ci_api30 -k "system-images;android-30;google_apis;x86_64" -d pixel_5 --force
           avdmanager list avd || true
 
-      # 4) Boot manual del emulador + validación + logs
-      - name: Boot emulator and collect logs (manual)
+      # 4) Boot manual del emulador + evidencias
+      - name: Boot emulator and collect logs
         shell: bash
         run: |
           set -eux
-
-          # ADB limpio y arriba
           adb kill-server || true
           adb start-server
-          adb version | tee adb_version.txt
-          adb devices -l | tee adb_devices_before.txt || true
+          adb devices -l || true
 
-          # Lanzar emulador en background en un puerto fijo (5556), sin aceleración ni ventana
-          emulator -avd ci_api30 \
-            -port 5556 \
+          emulator -avd ci_api30 -port 5556 \
             -no-window -no-boot-anim -no-audio \
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data \
-            -accel off \
-            -gpu swiftshader_indirect \
+            -accel off -gpu swiftshader_indirect \
             -camera-back none -camera-front none \
             -verbose > emulator_stdout.log 2>&1 &
 
           EMU_PID=$!
-          echo "EMU_PID=$EMU_PID"
-
-          # Esperar ADB y boot real
-          adb wait-for-device
-          timeout 900 bash -c 'until adb shell getprop sys.boot_completed | grep -m1 1; do sleep 2; done'
-          # (opcional) esperar fin de boot animation
-          adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
-
-          # Evidencia
+          timeout 900 bash -c 'until adb shell getprop sys.boot_completed | grep -qm1 1; do sleep 2; done'
+          adb version | tee adb_version.txt
           {
             echo "BOOT_OK=1"
-            echo "SERIAL=$(adb get-serialno | tr -d $'\r')"
-            echo "MODEL=$(adb shell getprop ro.product.model | tr -d $'\r')"
-            echo "ANDROID=$(adb shell getprop ro.build.version.release | tr -d $'\r')"
-            echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d $'\r')"
-            echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d $'\r')"
+            echo "SERIAL=$(adb get-serialno)"
+            echo "MODEL=$(adb shell getprop ro.product.model)"
+            echo "ANDROID=$(adb shell getprop ro.build.version.release)"
+            echo "SDK=$(adb shell getprop ro.build.version.sdk)"
+            echo "ABI=$(adb shell getprop ro.product.cpu.abi)"
           } | tee emulator-boot.log
-
-          adb devices -l | tee adb_devices_after.txt || true
+          adb devices -l | tee adb_devices_after.txt
           adb logcat -d -t 200 > logcat_tail.txt || true
 
-          # Cierre limpio (no es crítico si falla)
           adb -s emulator-5556 emu kill || true
           timeout 30 tail --pid=$EMU_PID -f /dev/null || true
 
-      # 5) Validación mínima y artifacts
       - name: Validate boot evidence
         run: |
           set -eu
-          test -s adb_version.txt
           test -s emulator-boot.log
           grep -q "BOOT_OK=1" emulator-boot.log
-          echo "OK: emulador booteado (manual) y ADB operativo."
 
       - name: Upload artifacts
         if: always()
@@ -122,7 +97,6 @@ jobs:
           name: emulator-manual-logs
           path: |
             adb_version.txt
-            adb_devices_before.txt
             adb_devices_after.txt
             emulator-boot.log
             emulator_stdout.log
