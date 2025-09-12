@@ -1,3 +1,11 @@
+name: Android emulator smoke (manual SDK + AVD)
+
+on: [push, pull_request, workflow_dispatch]
+
+concurrency:
+  group: emulator-manual-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   emulator-only:
     runs-on: ubuntu-latest
