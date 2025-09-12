@@ -1,54 +1,62 @@
-name: Android emulator smoke (solo boot)
+name: Android emulator smoke (solo boot, robusto)
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: emulator-only-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   emulator-only:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # JDK requerido por las herramientas del SDK (adb/emulador)
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # Boot del emulador y recolección de evidencia básica
       - name: Boot emulator (API 30) and collect logs
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true          # el teardown suele avisar error; validamos después
+        continue-on-error: true
         with:
           api-level: 30
-          target: google_apis_playstore  # imagen estable; no abrimos nada dentro
+          target: google_apis          # <- más liviana que Play Store
           arch: x86_64
           profile: pixel_5
           force-avd-creation: true
-          disable-animations: false
+          # dar más tiempo al boot (ms). default ~600000
+          emulator-boot-timeout: 1200000
+          # hardware más liviano
+          cores: 2
+          ram-size: 2048
+          heap-size: 384
+          disk-size: 8G
+          # flags para CI sin GPU/sonido/cámaras/snapshot
           emulator-options: >
-            -no-window -no-boot-anim
+            -no-window -no-boot-anim -no-audio
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
             -gpu swiftshader_indirect
             -camera-back none -camera-front none
+          disable-animations: false
           script: |
-            # Cada línea es un /bin/sh independiente → no uses variables entre líneas
             set -eu
-
-            # Generar evidencia desde el arranque del script (aunque el emu aún no esté)
+            # Si llegamos aquí, el emu ya está arriba.
             adb version | tee "$GITHUB_WORKSPACE/adb_version.txt" || true
             echo "SCRIPT_STARTED=1" > "$GITHUB_WORKSPACE/emulator-script.log"
 
-            # Boot del emulador
             adb wait-for-device
             until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
             adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
 
-            # Log del boot
             {
               echo "BOOT_OK=1"
               echo "SERIAL=$(adb get-serialno | tr -d '\r')"
@@ -57,31 +65,22 @@ jobs:
               echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
               echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
               echo "ABILIST=$(adb shell getprop ro.product.cpu.abilist | tr -d '\r')"
-              echo "BOOT_COMPLETED=$(adb shell getprop sys.boot_completed | tr -d '\r')"
-              echo "TARGET=google_apis_playstore; API=30; ARCH=x86_64; PROFILE=pixel_5"
+              echo "TARGET=google_apis; API=30; ARCH=x86_64; PROFILE=pixel_5"
             } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
 
-            # Últimas líneas de logcat (como smoke)
             adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
 
-      # Validación: falla el job si el emu no booteó
       - name: Validate boot evidence
         run: |
           set -eu
           if [ ! -s emulator-script.log ]; then
-            echo "ERROR: el step del emulador NO llegó a ejecutar el script (falló antes de 'script:')."
+            echo "ERROR: el action nunca llegó a ejecutar 'script:' (timeout de boot interno)."
             exit 1
           fi
-          # adb_version ya no es crítico (lo dejamos como warning si faltara)
-          if [ ! -s adb_version.txt ]; then
-            echo "WARN: falta adb_version.txt (no es crítico, pero debería existir)."
-          fi
           test -s emulator-boot.log || (echo "ERROR: no se generó emulator-boot.log" && exit 1)
-          grep -q "BOOT_OK=1" emulator-boot.log || (echo "ERROR: Emulador no booteó correctamente" && exit 1)
-          echo "OK: emulador booteado y evidencias presentes."
+          grep -q "BOOT_OK=1" emulator-boot.log || (echo "ERROR: el emulador no reportó boot completo" && exit 1)
+          echo "OK: emulador instalado y booteado."
 
-
-      # Logs como artifact para descargar
       - name: Upload artifacts (logs)
         if: always()
         uses: actions/upload-artifact@v4
