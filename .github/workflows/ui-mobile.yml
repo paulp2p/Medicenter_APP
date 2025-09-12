@@ -65,14 +65,19 @@ jobs:
         shell: bash
         run: |
           set -eux
-          ADB="$ANDROID_SDK_ROOT/platform-tools/adb"
-          EMU="$ANDROID_SDK_ROOT/emulator/emulator"
+          SDK="$ANDROID_SDK_ROOT"
+          ADB="$SDK/platform-tools/adb"
+          EMU="$SDK/emulator/emulator"
 
+          # ADB limpio
           $ADB kill-server || true
           $ADB start-server
           $ADB devices -l || true
 
-          "$EMU" -avd ci_api30 -port 5556 \
+          # Lanzar emulador en background
+          CONSOLE_PORT=5554
+          SERIAL="emulator-${CONSOLE_PORT}"
+          "$EMU" -avd ci_api30 -port ${CONSOLE_PORT} \
             -no-window -no-boot-anim -no-audio \
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data \
             -accel off -gpu swiftshader_indirect \
@@ -80,29 +85,52 @@ jobs:
             -verbose > emulator_stdout.log 2>&1 &
 
           EMU_PID=$!
-          timeout 900 bash -c 'until '"$ADB"' shell getprop sys.boot_completed | grep -qm1 1; do sleep 2; done'
+          echo "EMU_PID=$EMU_PID"
 
+          # ---- ESPERAR A QUE APAREZCA EL DISPOSITIVO EN ADB ----
+          SEEN=""
+          for i in $(seq 1 300); do   # ~10 min
+            if $ADB devices | awk 'NR>1{print $1,$2}' | grep -q "^${SERIAL} device$"; then
+              SEEN="yes"; break
+            fi
+            # si el proceso murió, volcamos logs y fallamos claro
+            if ! kill -0 "$EMU_PID" 2>/dev/null; then
+              echo "El proceso del emulador terminó antes de registrarse en ADB."
+              tail -n +1 emulator_stdout.log | head -n 300
+              exit 1
+            fi
+            sleep 2
+          done
+          [ -n "$SEEN" ] || { echo "Timeout esperando ${SERIAL} en 'adb devices'"; tail -n 200 emulator_stdout.log; exit 1; }
+
+          # A partir de acá YA hay device -> ahora sí usamos shell/getprop
+          $ADB -s "$SERIAL" wait-for-device
+          timeout 900 bash -c 'until '"$ADB"' -s '"$SERIAL"' shell getprop sys.boot_completed | grep -qm1 1; do sleep 2; done'
+          $ADB -s "$SERIAL" shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
+
+          # Evidencias
           $ADB version | tee adb_version.txt
           {
             echo "BOOT_OK=1"
-            echo "SERIAL=$($ADB get-serialno)"
-            echo "MODEL=$($ADB shell getprop ro.product.model)"
-            echo "ANDROID=$($ADB shell getprop ro.build.version.release)"
-            echo "SDK=$($ADB shell getprop ro.build.version.sdk)"
-            echo "ABI=$($ADB shell getprop ro.product.cpu.abi)"
+            echo "SERIAL=$SERIAL"
+            echo "MODEL=$($ADB -s "$SERIAL" shell getprop ro.product.model)"
+            echo "ANDROID=$($ADB -s "$SERIAL" shell getprop ro.build.version.release)"
+            echo "SDK=$($ADB -s "$SERIAL" shell getprop ro.build.version.sdk)"
+            echo "ABI=$($ADB -s "$SERIAL" shell getprop ro.product.cpu.abi)"
           } | tee emulator-boot.log
           $ADB devices -l | tee adb_devices_after.txt
-          $ADB logcat -d -t 200 > logcat_tail.txt || true
+          $ADB -s "$SERIAL" logcat -d -t 200 > logcat_tail.txt || true
 
-          $ADB -s emulator-5556 emu kill || true
-          timeout 30 tail --pid=$EMU_PID -f /dev/null || true
+          # Apagado suave (no crítico si falla)
+          $ADB -s "$SERIAL" emu kill || true
+          timeout 30 tail --pid="$EMU_PID" -f /dev/null || true
 
-      - name: Validate boot evidence
-        run: |
-          set -eu
-          test -s emulator-boot.log
-          grep -q "BOOT_OK=1" emulator-boot.log
-          echo "OK: emulador booteado (manual) y ADB operativo."
+            - name: Validate boot evidence
+              run: |
+                set -eu
+                test -s emulator-boot.log
+                grep -q "BOOT_OK=1" emulator-boot.log
+                echo "OK: emulador booteado (manual) y ADB operativo."
 
       - name: Upload artifacts
         if: always()
