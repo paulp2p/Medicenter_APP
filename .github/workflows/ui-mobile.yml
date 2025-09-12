@@ -23,7 +23,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 1) Instalar cmdline-tools y ponerlos en PATH con $GITHUB_PATH
+      # 1) Instalar cmdline-tools (rutas ABSOLUTAS)
       - name: Install Android cmdline-tools
         run: |
           set -eux
@@ -32,35 +32,47 @@ jobs:
           unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
           mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           rm -f cmdline-tools.zip
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --version
+          # Para steps siguientes (opcional)
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          sdkmanager --version
 
-      # 2) Paquetes mínimos + PATH para adb/emulator
+      # 2) Paquetes mínimos del SDK
       - name: Install SDK packages
         run: |
           set -eux
-          yes | sdkmanager --licenses
-          yes | sdkmanager "platform-tools" "emulator" "platforms;android-30" "system-images;android-30;google_apis;x86_64"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-30" \
+            "system-images;android-30;google_apis;x86_64"
+          # Para steps siguientes (opcional)
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/emulator"       >> "$GITHUB_PATH"
 
-      # 3) Crear AVD limpio
+      # 3) Crear AVD
       - name: Create AVD (Pixel 5 • API 30 • google_apis x86_64)
         run: |
           set -eux
-          echo "no" | avdmanager create avd -n ci_api30 -k "system-images;android-30;google_apis;x86_64" -d pixel_5 --force
-          avdmanager list avd || true
+          echo "no" | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/avdmanager" \
+            create avd -n ci_api30 \
+            -k "system-images;android-30;google_apis;x86_64" \
+            -d pixel_5 --force
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/avdmanager" list avd || true
 
-      # 4) Boot manual del emulador + evidencias
+      # 4) Boot del emulador + evidencias (todo con rutas ABSOLUTAS)
       - name: Boot emulator and collect logs
         shell: bash
         run: |
           set -eux
-          adb kill-server || true
-          adb start-server
-          adb devices -l || true
+          ADB="$ANDROID_SDK_ROOT/platform-tools/adb"
+          EMU="$ANDROID_SDK_ROOT/emulator/emulator"
 
-          emulator -avd ci_api30 -port 5556 \
+          $ADB kill-server || true
+          $ADB start-server
+          $ADB devices -l || true
+
+          "$EMU" -avd ci_api30 -port 5556 \
             -no-window -no-boot-anim -no-audio \
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data \
             -accel off -gpu swiftshader_indirect \
@@ -68,20 +80,21 @@ jobs:
             -verbose > emulator_stdout.log 2>&1 &
 
           EMU_PID=$!
-          timeout 900 bash -c 'until adb shell getprop sys.boot_completed | grep -qm1 1; do sleep 2; done'
-          adb version | tee adb_version.txt
+          timeout 900 bash -c 'until '"$ADB"' shell getprop sys.boot_completed | grep -qm1 1; do sleep 2; done'
+
+          $ADB version | tee adb_version.txt
           {
             echo "BOOT_OK=1"
-            echo "SERIAL=$(adb get-serialno)"
-            echo "MODEL=$(adb shell getprop ro.product.model)"
-            echo "ANDROID=$(adb shell getprop ro.build.version.release)"
-            echo "SDK=$(adb shell getprop ro.build.version.sdk)"
-            echo "ABI=$(adb shell getprop ro.product.cpu.abi)"
+            echo "SERIAL=$($ADB get-serialno)"
+            echo "MODEL=$($ADB shell getprop ro.product.model)"
+            echo "ANDROID=$($ADB shell getprop ro.build.version.release)"
+            echo "SDK=$($ADB shell getprop ro.build.version.sdk)"
+            echo "ABI=$($ADB shell getprop ro.product.cpu.abi)"
           } | tee emulator-boot.log
-          adb devices -l | tee adb_devices_after.txt
-          adb logcat -d -t 200 > logcat_tail.txt || true
+          $ADB devices -l | tee adb_devices_after.txt
+          $ADB logcat -d -t 200 > logcat_tail.txt || true
 
-          adb -s emulator-5556 emu kill || true
+          $ADB -s emulator-5556 emu kill || true
           timeout 30 tail --pid=$EMU_PID -f /dev/null || true
 
       - name: Validate boot evidence
@@ -89,6 +102,7 @@ jobs:
           set -eu
           test -s emulator-boot.log
           grep -q "BOOT_OK=1" emulator-boot.log
+          echo "OK: emulador booteado (manual) y ADB operativo."
 
       - name: Upload artifacts
         if: always()
