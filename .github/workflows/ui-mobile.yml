@@ -1,4 +1,4 @@
-name: Emulator smoke (fix ADB first)
+name: Android emulator smoke (manual SDK + AVD)
 
 on:
   push:
@@ -6,85 +6,124 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: emulator-only-${{ github.ref }}
+  group: emulator-manual-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   emulator-only:
-    runs-on: ubuntu-latest            # si es macOS: macos-14
+    runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      PATH: ${{ github.workspace }}/android-sdk/platform-tools:${{ github.workspace }}/android-sdk/emulator:${{ github.workspace }}/android-sdk/cmdline-tools/latest/bin:${{ env.PATH }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # 1) Levantar ADB ANTES del action (evita "Unable to connect to adb daemon on port: 5037")
-      - name: Warm up ADB daemon
+      - name: Set up Java 17 (required by sdkmanager/avdmanager)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 1) Instalar SDK cmdline-tools local (sin depender del preinstalado del runner)
+      - name: Install Android cmdline-tools
         run: |
           set -eux
-          ADB=/usr/local/lib/android/sdk/platform-tools/adb
-          $ADB kill-server || true
-          $ADB start-server
-          $ADB version
-          $ADB devices -l || true
+          mkdir -p "$ANDROID_SDK_ROOT"
+          curl -sSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT"
+          # Reubicar al layout esperado: cmdline-tools/latest/...
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/"* "$ANDROID_SDK_ROOT/cmdline-tools/latest/" || true
+          rm -f cmdline-tools.zip
+          sdkmanager --version
 
-      # 2) Arrancar emulador (el action ya encontrará ADB vivo)
-      - name: Boot emulator and collect logs
-        uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true
-        env:
-          # Mantener ambos en el mismo puerto (por si el emulador mira esta var)
-          ADB_SERVER_PORT: 5037
-          ANDROID_ADB_SERVER_PORT: 5037
-        with:
-          api-level: 30
-          target: google_apis
-          arch: x86_64                 # si es macOS (Apple Silicon): arm64-v8a y mejor api-level: 33
-          profile: pixel_5
-          force-avd-creation: true
-          emulator-boot-timeout: 1800000
-          emulator-options: >
-            -no-window -no-boot-anim -no-audio
-            -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
-            -accel off                          # en Ubuntu CI es lo más estable
-            -gpu swiftshader_indirect
-            -camera-back none -camera-front none
-            -verbose
-          disable-animations: false
-          script: |
-            set -eu
-            adb wait-for-device
-            until adb shell getprop sys.boot_completed | grep -m 1 '1'; do sleep 1; done
-            adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
+      # 2) Aceptar licencias e instalar paquetes mínimos + imagen del sistema
+      - name: Install SDK packages (platform-tools, emulator, API 30 x86_64)
+        run: |
+          set -eux
+          yes | sdkmanager --licenses
+          yes | sdkmanager \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-30" \
+            "system-images;android-30;google_apis;x86_64"
 
-            adb version | tee "$GITHUB_WORKSPACE/adb_version.txt" || true
-            {
-              echo "BOOT_OK=1"
-              echo "SERIAL=$(adb get-serialno | tr -d '\r')"
-              echo "MODEL=$(adb shell getprop ro.product.model | tr -d '\r')"
-              echo "ANDROID=$(adb shell getprop ro.build.version.release | tr -d '\r')"
-              echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
-              echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
-            } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
+      # 3) Crear AVD limpio
+      - name: Create AVD (Pixel 5 • API 30 • google_apis x86_64)
+        run: |
+          set -eux
+          echo "no" | avdmanager create avd -n ci_api30 -k "system-images;android-30;google_apis;x86_64" -d pixel_5 --force
+          avdmanager list avd || true
 
-            adb devices -l | tee "$GITHUB_WORKSPACE/adb_devices.txt" || true
-            adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
+      # 4) Boot manual del emulador + validación + logs
+      - name: Boot emulator and collect logs (manual)
+        shell: bash
+        run: |
+          set -eux
 
-      - name: Validate boot
+          # ADB limpio y arriba
+          adb kill-server || true
+          adb start-server
+          adb version | tee adb_version.txt
+          adb devices -l | tee adb_devices_before.txt || true
+
+          # Lanzar emulador en background en un puerto fijo (5556), sin aceleración ni ventana
+          emulator -avd ci_api30 \
+            -port 5556 \
+            -no-window -no-boot-anim -no-audio \
+            -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data \
+            -accel off \
+            -gpu swiftshader_indirect \
+            -camera-back none -camera-front none \
+            -verbose > emulator_stdout.log 2>&1 &
+
+          EMU_PID=$!
+          echo "EMU_PID=$EMU_PID"
+
+          # Esperar ADB y boot real
+          adb wait-for-device
+          timeout 900 bash -c 'until adb shell getprop sys.boot_completed | grep -m1 1; do sleep 2; done'
+          # (opcional) esperar fin de boot animation
+          adb shell 'until [ "$(getprop init.svc.bootanim)" = "stopped" ] || [ -z "$(getprop init.svc.bootanim)" ]; do sleep 1; done' || true
+
+          # Evidencia
+          {
+            echo "BOOT_OK=1"
+            echo "SERIAL=$(adb get-serialno | tr -d $'\r')"
+            echo "MODEL=$(adb shell getprop ro.product.model | tr -d $'\r')"
+            echo "ANDROID=$(adb shell getprop ro.build.version.release | tr -d $'\r')"
+            echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d $'\r')"
+            echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d $'\r')"
+          } | tee emulator-boot.log
+
+          adb devices -l | tee adb_devices_after.txt || true
+          adb logcat -d -t 200 > logcat_tail.txt || true
+
+          # Cierre limpio (no es crítico si falla)
+          adb -s emulator-5556 emu kill || true
+          timeout 30 tail --pid=$EMU_PID -f /dev/null || true
+
+      # 5) Validación mínima y artifacts
+      - name: Validate boot evidence
         run: |
           set -eu
-          test -s adb_version.txt || (echo "Falta adb_version.txt" && exit 1)
-          test -s emulator-boot.log || (echo "Falta emulator-boot.log" && exit 1)
-          grep -q "BOOT_OK=1" emulator-boot.log || (echo "No hubo boot completo" && exit 1)
-          echo "OK: emulador booteado y ADB operativo."
+          test -s adb_version.txt
+          test -s emulator-boot.log
+          grep -q "BOOT_OK=1" emulator-boot.log
+          echo "OK: emulador booteado (manual) y ADB operativo."
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifacts
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: emulator-logs
+          name: emulator-manual-logs
           path: |
             adb_version.txt
-            adb_devices.txt
+            adb_devices_before.txt
+            adb_devices_after.txt
             emulator-boot.log
+            emulator_stdout.log
             logcat_tail.txt
