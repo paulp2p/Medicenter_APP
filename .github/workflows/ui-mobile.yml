@@ -11,8 +11,8 @@ concurrency:
 
 jobs:
   emulator-only:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+    runs-on: macos-latest
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -34,7 +34,7 @@ jobs:
           profile: pixel_5
           force-avd-creation: true
           # dar más tiempo al boot (ms). default ~600000
-          emulator-boot-timeout: 1200000
+          emulator-boot-timeout: 1800000
           # hardware más liviano
           cores: 2
           ram-size: 2048
