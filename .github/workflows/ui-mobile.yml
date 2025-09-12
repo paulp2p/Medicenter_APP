@@ -1,4 +1,4 @@
-name: Android emulator smoke (solo boot, robusto)
+name: Android emulator smoke (macOS • solo boot)
 
 on:
   push:
@@ -11,8 +11,8 @@ concurrency:
 
 jobs:
   emulator-only:
-    runs-on: macos-latest
-    timeout-minutes: 40
+    runs-on: macos-14          # macOS (Apple Silicon)
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -24,32 +24,28 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Boot emulator (API 30) and collect logs
+      - name: Boot emulator (API 30 • ARM64) and collect logs
         uses: ReactiveCircus/android-emulator-runner@v2
-        continue-on-error: true
+        continue-on-error: true                 # ignoramos warning de teardown
         with:
           api-level: 30
-          target: google_apis          # <- más liviana que Play Store
-          arch: x86_64
+          target: google_apis                   # más liviano que Play Store
+          arch: arm64-v8a                       # << CLAVE en macOS (no x86_64)
           profile: pixel_5
           force-avd-creation: true
-          # dar más tiempo al boot (ms). default ~600000
-          emulator-boot-timeout: 1800000
-          # hardware más liviano
-          cores: 2
-          ram-size: 2048
-          heap-size: 384
-          disk-size: 8G
-          # flags para CI sin GPU/sonido/cámaras/snapshot
+          emulator-boot-timeout: 1800000        # hasta 30 min por si descarga imagen
+          # Hardware/flags recomendados para macOS (HVF)
           emulator-options: >
             -no-window -no-boot-anim -no-audio
             -no-snapshot -no-snapshot-load -no-snapshot-save -wipe-data
-            -gpu swiftshader_indirect
+            -gpu host
             -camera-back none -camera-front none
+            -accel hvf
+            -verbose
           disable-animations: false
           script: |
             set -eu
-            # Si llegamos aquí, el emu ya está arriba.
+            # Si llegamos aquí, el emu lanzó y ADB está disponible.
             adb version | tee "$GITHUB_WORKSPACE/adb_version.txt" || true
             echo "SCRIPT_STARTED=1" > "$GITHUB_WORKSPACE/emulator-script.log"
 
@@ -65,21 +61,22 @@ jobs:
               echo "SDK=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
               echo "ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
               echo "ABILIST=$(adb shell getprop ro.product.cpu.abilist | tr -d '\r')"
-              echo "TARGET=google_apis; API=30; ARCH=x86_64; PROFILE=pixel_5"
+              echo "TARGET=google_apis; API=30; ARCH=arm64-v8a; PROFILE=pixel_5"
             } | tee "$GITHUB_WORKSPACE/emulator-boot.log"
 
+            # Peek de logcat como smoke
             adb logcat -d -t 200 > "$GITHUB_WORKSPACE/logcat_tail.txt" || true
 
       - name: Validate boot evidence
         run: |
           set -eu
           if [ ! -s emulator-script.log ]; then
-            echo "ERROR: el action nunca llegó a ejecutar 'script:' (timeout de boot interno)."
+            echo "ERROR: el action nunca llegó a ejecutar 'script:' (timeout antes del boot)."
             exit 1
           fi
           test -s emulator-boot.log || (echo "ERROR: no se generó emulator-boot.log" && exit 1)
           grep -q "BOOT_OK=1" emulator-boot.log || (echo "ERROR: el emulador no reportó boot completo" && exit 1)
-          echo "OK: emulador instalado y booteado."
+          echo "OK: emulador ARM64 booteado en macOS."
 
       - name: Upload artifacts (logs)
         if: always()
