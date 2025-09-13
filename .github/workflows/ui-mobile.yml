@@ -1,10 +1,10 @@
-name: Android Behave Tests (emulator-runner + APK de Drive)
+name: Android Behave Tests (APK desde Drive, emulador manual)
 
 on:
   workflow_dispatch:
     inputs:
       behave_tags:
-        description: 'Etiquetas Behave (ej: @smoke o @regression) — opcional'
+        description: 'Etiquetas Behave (ej: @smoke, @regression) — opcional'
         required: false
         default: ''
   push:
@@ -16,26 +16,31 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+  ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
+  API_LEVEL: 30
+  AVD_NAME: ci-pixel5-api30
+  DEVICE_PROFILE: pixel_5
   APK_LOCAL_NAME: medicenter_app.apk
   PY_VERSION: "3.11"
 
-  # Appium (puente con el emulador)
+  # Appium (puente)
   USE_APPIUM: "true"
   APPIUM_HOST: "127.0.0.1"
   APPIUM_PORT: "4723"
 
-  # rclone / Google Drive
+  # Google Drive / rclone
   RCLONE_REMOTE: "gdrive"
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
 
-  # (Opcional, completa si tu framework lo usa)
+  # (Opcional según tu framework)
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
 jobs:
   android-behave:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -86,7 +91,6 @@ jobs:
             echo "Falta secrets.RCLONE_CONF_B64"; exit 1
           fi
           mkdir -p ~/.config/rclone
-          # limpiar CR/LF/tabs/espacios y completar padding (=) para múltiplo de 4
           CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
           PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
@@ -101,56 +105,124 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
-      # ---------- Emulador con android-emulator-runner ----------
-      - name: Launch emulator + run tests
-        uses: ReactiveCircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          emulator-options: -no-window -no-boot-anim -no-snapshot -accel off -gpu swiftshader_indirect -no-metrics
-          disable-animations: true
-          script: |
-            set -eux
-            export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
-            export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
+      # ---------- ANDROID SDK + EMULADOR (manual, con ADB robusto) ----------
+      - name: Instalar Android SDK (cmdline-tools) y componentes
+        run: |
+          set -eux
+          mkdir -p "$ANDROID_SDK_ROOT"
+          cd "$ANDROID_SDK_ROOT"
+          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          mkdir -p cmdline-tools
+          unzip -q cmdline-tools.zip -d cmdline-tools
+          mv cmdline-tools/cmdline-tools cmdline-tools/latest
+          rm -f cmdline-tools.zip
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-            # ADB confiable
-            adb kill-server || true
-            adb start-server
-            adb devices
+          yes | sdkmanager --licenses
+          yes | sdkmanager \
+            "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
+            "system-images;android-${API_LEVEL};google_apis;x86_64"
 
-            # Esperar boot explícitamente (hasta 10 min)
-            timeout=0
-            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
-              sleep 5
-              timeout=$((timeout+5))
-              if [ $timeout -gt 600 ]; then echo "Timeout esperando boot_completed"; exit 1; fi
-            done
+          adb version
+          emulator -version
 
-            # Instalar APK (desinstalar si ya existe para evitar conflictos de firma)
-            if [ -n "${APP_PACKAGE:-}" ]; then
-              adb uninstall "${APP_PACKAGE}" || true
-            fi
-            adb install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+      - name: Crear AVD
+        run: |
+          set -eux
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          mkdir -p "$ANDROID_AVD_HOME"
+          yes "no" | avdmanager create avd \
+            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
+            -d "$DEVICE_PROFILE" --force
+          {
+            echo "hw.cpu.ncore=2"
+            echo "disk.dataPartition.size=2048M"
+          } >> "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
 
-            # Appium (opcional)
-            if [ "${USE_APPIUM}" = "true" ]; then
-              npm i -g appium
-              appium driver install uiautomator2
-              nohup appium --base-path /wd/hub --address $APPIUM_HOST --port $APPIUM_PORT > appium.log 2>&1 &
-              for i in $(seq 1 60); do nc -z $APPIUM_HOST $APPIUM_PORT && break || true; sleep 1; done
-            fi
+      - name: Iniciar emulador (headless) y estabilizar ADB
+        run: |
+          set -eux
+          export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          # matar cualquier ADB colgado
+          pkill -f "adb" || true
 
-            # Ejecutar Behave (con soporte de tags del dispatch)
-            mkdir -p reports/allure-results
-            TAGS_INPUT="${{ github.event.inputs.behave_tags }}"
-            if [ -n "$TAGS_INPUT" ]; then
-              behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "$TAGS_INPUT"
-            else
-              behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
-            fi
+          # lanzar emulador sin KVM, sin audio, sin snapshot
+          nohup emulator -avd "$AVD_NAME" \
+            -no-window -no-boot-anim -no-snapshot -accel off \
+            -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
+            -writable-system -no-metrics > emulator.log 2>&1 &
+
+          # ADB robusto: levantar servidor y esperar a que aparezca el dispositivo (device u offline)
+          export ADB_VENDOR_KEYS=
+          adb kill-server || true
+          adb start-server
+          # esperar que adb vea el emulador (device/offline)
+          t=0
+          until adb devices | awk 'NR>1 {print $2}' | grep -qE 'device|offline'; do
+            sleep 3; t=$((t+3)); if [ $t -gt 120 ]; then echo "adb no ve el emulador"; tail -n +1 emulator.log; exit 1; fi
+          done
+
+          # si está offline, intentar reconectar varias veces
+          for i in $(seq 1 20); do
+            state="$(adb get-state || true)"
+            if [ "$state" = "device" ]; then break; fi
+            adb reconnect offline || true
+            adb reconnect || true
+            sleep 3
+          done
+
+          # Esperar boot completo (hasta 10 min)
+          boot=""
+          for i in $(seq 1 120); do
+            boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            if [ "$boot" = "1" ]; then break; fi
+            sleep 5
+          done
+          if [ "$boot" != "1" ]; then
+            echo "El emulador no booteó a tiempo"; tail -n +1 emulator.log; exit 1
+          fi
+
+          # Desactivar animaciones para estabilidad
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+
+      - name: Instalar APK en el emulador
+        run: |
+          set -eux
+          adb devices
+          # opcional: desinstalar si ya existe para evitar conflicto de firma
+          if [ -n "${APP_PACKAGE:-}" ]; then
+            adb uninstall "${APP_PACKAGE}" || true
+          fi
+          adb install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+
+      - name: (Opcional) Instalar y arrancar Appium
+        if: env.USE_APPIUM == 'true'
+        run: |
+          set -eux
+          npm i -g appium
+          appium driver install uiautomator2
+          nohup appium --base-path /wd/hub --address $APPIUM_HOST --port $APPIUM_PORT > appium.log 2>&1 &
+          for i in $(seq 1 60); do nc -z $APPIUM_HOST $APPIUM_PORT && exit 0 || true; sleep 1; done
+          echo "Appium no inició a tiempo"; exit 1
+
+      - name: Ejecutar tests (Behave)
+        env:
+          DEVICE_NAME: "emulator-5554"
+          PLATFORM_NAME: "Android"
+          AUTOMATION_NAME: "UiAutomator2"
+          APPIUM_SERVER_URL: "http://${{ env.APPIUM_HOST }}:${{ env.APPIUM_PORT }}/wd/hub"
+          APP_PACKAGE: ${{ env.APP_PACKAGE }}
+          APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
+        run: |
+          set -eux
+          mkdir -p reports/allure-results
+          if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
+            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
+          else
+            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+          fi
 
       - name: Subir artefactos (Allure, logs)
         if: always()
@@ -161,5 +233,15 @@ jobs:
             reports/allure-results/**
             appium.log
             adb-install.log
+            emulator.log
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Apagar emulador y limpiar
+        if: always()
+        run: |
+          set -eux
+          adb emu kill || true
+          pkill -f "emulator" || true
+          pkill -f "appium" || true
+          adb kill-server || true
