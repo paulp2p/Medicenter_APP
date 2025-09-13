@@ -105,6 +105,18 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
+      # ---------- Dependencias de sistema del emulador ----------
+      - name: Instalar dependencias del emulador (libs)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpulse0 libasound2 libnss3 \
+            libx11-6 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
+            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
+            libgl1 libgles2 libvulkan1 libdrm2 libxshmfence1 libgbm1 \
+            libfontconfig1 ca-certificates
+
       # ---------- ANDROID SDK + EMULADOR (manual, con ADB robusto) ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
         run: |
@@ -116,6 +128,13 @@ jobs:
           unzip -q cmdline-tools.zip -d cmdline-tools
           mv cmdline-tools/cmdline-tools cmdline-tools/latest
           rm -f cmdline-tools.zip
+
+          # Persistir PATH para TODOS los pasos siguientes
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+
+          # PATH local para este paso
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
           yes | sdkmanager --licenses
