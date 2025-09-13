@@ -29,8 +29,8 @@ env:
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
 
   # (Opcional, completa si tu framework lo usa)
-  APP_PACKAGE: "com.siltium.medicenter.MainActivity"
-  APP_ACTIVITY: "com.siltium.medicenter"  
+  APP_PACKAGE: "com.siltium.medicenter"
+  APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
 jobs:
   android-behave:
@@ -79,23 +79,18 @@ jobs:
       - name: "Configurar rclone (desde secreto base64 robusto)"
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           if [ -z "${RCLONE_CONF_B64:-}" ]; then
             echo "Falta secrets.RCLONE_CONF_B64"; exit 1
           fi
           mkdir -p ~/.config/rclone
-          python - <<'PY'
-import os, base64, pathlib
-b = os.environ["RCLONE_CONF_B64"].encode()
-# limpiar espacios/saltos y completar padding
-b = b"".join(b.split())
-b += b"=" * ((4 - (len(b) % 4)) % 4)
-out = pathlib.Path.home() / ".config" / "rclone" / "rclone.conf"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_bytes(base64.b64decode(b))
-print("rclone.conf OK ->", out)
-PY
+          # limpiar CR/LF/tabs/espacios y completar padding (=) para múltiplo de 4
+          CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
+          PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
+          if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
+          printf '%s' "$CLEAN" | base64 -d > ~/.config/rclone/rclone.conf
           rclone version
           rclone listremotes
 
