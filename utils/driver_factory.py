@@ -64,6 +64,26 @@ def create_driver(config: dict):
     # Ruta APP (capability 'app') o package/activity
     app_path = os.getenv("APP", config.get("APP"))
     if app_path:
+        # ---------------------------------------------------------------------
+        # 🔧 Normalizar path de Windows cuando se ejecuta en Linux/macOS
+        # (evita que "C:\...\apk" se convierta en "/home/runner/.../C:\...\apk")
+        if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
+            win_basename = os.path.basename(app_path.replace("\\", "/"))
+            # Preferimos el archivo en el cwd (el APK descargado por el workflow)
+            candidate = os.path.abspath(win_basename)
+            if os.path.exists(candidate):
+                print(f"[driver_factory] Normalizado APP desde Windows a: {candidate}")
+                app_path = candidate
+            else:
+                # Plan B: probar en GITHUB_WORKSPACE si existe
+                gw = os.getenv("GITHUB_WORKSPACE")
+                if gw:
+                    candidate2 = os.path.join(gw, win_basename)
+                    if os.path.exists(candidate2):
+                        print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
+                        app_path = candidate2
+        # ---------------------------------------------------------------------
+
         # Normaliza ruta relativa/absoluta (soporta Windows y Linux)
         if not os.path.isabs(app_path):
             app_path = os.path.abspath(app_path)
@@ -78,8 +98,10 @@ def create_driver(config: dict):
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 
+    pkg_for_log = os.getenv("APP_PACKAGE") or config.get("APP_PACKAGE", "<no-package>")
+    act_for_log = os.getenv("APP_ACTIVITY") or config.get("APP_ACTIVITY", "")
     print(f"[driver_factory] Appium server: {server_url}")
-    print(f"[driver_factory] Using app: {app_path or (os.getenv('APP_PACKAGE') + '/' + os.getenv('APP_ACTIVITY', ''))}")
+    print(f"[driver_factory] Using app: {app_path or (pkg_for_log + '/' + act_for_log)}")
 
     driver = webdriver.Remote(server_url, options=options)
 

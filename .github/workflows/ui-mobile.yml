@@ -250,23 +250,30 @@ jobs:
           for i in $(seq 1 60); do nc -z $APPIUM_HOST $APPIUM_PORT && break || true; sleep 1; done
           curl -s "http://$APPIUM_HOST:$APPIUM_PORT/status" || true
 
+        # ---------- TESTS (Behave) ----------
       - name: Ejecutar tests (Behave)
         env:
           DEVICE_NAME: "emulator-5554"
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          # Tu driver_factory toma este valor si está presente; coincide con el arranque sin base-path
           APPIUM_SERVER_URL: "http://${{ env.APPIUM_HOST }}:${{ env.APPIUM_PORT }}"
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
           APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
         run: |
           set -eux
+          # Exportar APP como ruta absoluta del APK descargado
+          APP_ABS="$(realpath "${APK_LOCAL_NAME}")"
+          echo "Usando APP=${APP_ABS}"
+          test -f "${APP_ABS}"
+          export APP="${APP_ABS}"
+
           mkdir -p reports/allure-results
           if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
           else
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
+
 
       - name: Subir artefactos (Allure, logs)
         if: always()
