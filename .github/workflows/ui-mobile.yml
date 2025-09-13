@@ -19,18 +19,18 @@ env:
   APK_LOCAL_NAME: medicenter_app.apk
   PY_VERSION: "3.11"
 
-  # Appium (puente)
+  # Appium (puente con el emulador)
   USE_APPIUM: "true"
   APPIUM_HOST: "127.0.0.1"
   APPIUM_PORT: "4723"
 
-  # rclone (ya verificado)
+  # rclone / Google Drive
   RCLONE_REMOTE: "gdrive"
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
 
-  # (Opcional) si tu framework los usa:
-  APP_PACKAGE: "###"   # ej: com.siltium.medicenterpro
-  APP_ACTIVITY: "###"  # ej: .MainActivity
+  # (Opcional, completa si tu framework lo usa)
+  APP_PACKAGE: "com.siltium.medicenter.MainActivity"
+  APP_ACTIVITY: "com.siltium.medicenter"  
 
 jobs:
   android-behave:
@@ -121,7 +121,7 @@ PY
             export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
             export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-            # Recuperar/asegurar ADB
+            # ADB confiable
             adb kill-server || true
             adb start-server
             adb devices
@@ -134,7 +134,7 @@ PY
               if [ $timeout -gt 600 ]; then echo "Timeout esperando boot_completed"; exit 1; fi
             done
 
-            # Instalar APK
+            # Instalar APK (desinstalar si ya existe para evitar conflictos de firma)
             if [ -n "${APP_PACKAGE:-}" ]; then
               adb uninstall "${APP_PACKAGE}" || true
             fi
@@ -148,7 +148,7 @@ PY
               for i in $(seq 1 60); do nc -z $APPIUM_HOST $APPIUM_PORT && break || true; sleep 1; done
             fi
 
-            # Ejecutar Behave (con soporte de tags de workflow_dispatch)
+            # Ejecutar Behave (con soporte de tags del dispatch)
             mkdir -p reports/allure-results
             TAGS_INPUT="${{ github.event.inputs.behave_tags }}"
             if [ -n "$TAGS_INPUT" ]; then
