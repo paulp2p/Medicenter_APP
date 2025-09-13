@@ -1,4 +1,4 @@
-name: Android Behave Tests (APK from Google Drive)
+name: Android Behave Tests (emulator-runner + APK de Drive)
 
 on:
   workflow_dispatch:
@@ -16,22 +16,21 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-  ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
-  API_LEVEL: 30
-  AVD_NAME: ci-pixel5-api30
-  DEVICE_PROFILE: pixel_5
   APK_LOCAL_NAME: medicenter_app.apk
   PY_VERSION: "3.11"
 
-  # Appium (puente entre framework y emulador)
+  # Appium (puente)
   USE_APPIUM: "true"
   APPIUM_HOST: "127.0.0.1"
   APPIUM_PORT: "4723"
 
-  # === Google Drive / rclone (ya verificados en tu PC) ===
+  # rclone (ya verificado)
   RCLONE_REMOTE: "gdrive"
-  GDRIVE_APK_PATH: "CI/medicenter_app.apk"   # ya existe según tu rclone ls
+  GDRIVE_APK_PATH: "CI/medicenter_app.apk"
+
+  # (Opcional) si tu framework los usa:
+  APP_PACKAGE: "###"   # ej: com.siltium.medicenterpro
+  APP_ACTIVITY: "###"  # ej: .MainActivity
 
 jobs:
   android-behave:
@@ -42,13 +41,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17 (Temurin)
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Node 22 (para Appium)
+      - name: Set up Node (Appium)
         if: env.USE_APPIUM == 'true'
         uses: actions/setup-node@v4
         with:
@@ -58,9 +57,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_VERSION }}
-          cache: 'pip'
+          cache: "pip"
 
-      - name: Instalar dependencias Python del proyecto
+      - name: Instalar dependencias Python
         run: |
           set -eux
           python -m pip install -U pip
@@ -70,24 +69,33 @@ jobs:
             pip install behave selenium appium-python-client allure-behave
           fi
 
-      # ---------- RCLONE: instalar, restaurar config desde secreto y smoke test ----------
-      - name: Instalar rclone y netcat
+      # ---------- RCLONE: restaurar config desde secreto y smoke test ----------
+      - name: Instalar rclone
         run: |
           set -eux
           sudo apt-get update
           sudo apt-get install -y rclone netcat-openbsd
 
-      - name: Configurar rclone (desde secreto base64)
+      - name: "Configurar rclone (desde secreto base64 robusto)"
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
         run: |
-          set -eux
+          set -eu
           if [ -z "${RCLONE_CONF_B64:-}" ]; then
-            echo "Falta secrets.RCLONE_CONF_B64 (rclone.conf en base64)."
-            exit 1
+            echo "Falta secrets.RCLONE_CONF_B64"; exit 1
           fi
           mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONF_B64" | base64 -d > ~/.config/rclone/rclone.conf
+          python - <<'PY'
+import os, base64, pathlib
+b = os.environ["RCLONE_CONF_B64"].encode()
+# limpiar espacios/saltos y completar padding
+b = b"".join(b.split())
+b += b"=" * ((4 - (len(b) % 4)) % 4)
+out = pathlib.Path.home() / ".config" / "rclone" / "rclone.conf"
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_bytes(base64.b64decode(b))
+print("rclone.conf OK ->", out)
+PY
           rclone version
           rclone listremotes
 
@@ -98,109 +106,58 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
+      # ---------- Emulador con android-emulator-runner ----------
+      - name: Launch emulator + run tests
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          emulator-options: -no-window -no-boot-anim -no-snapshot -accel off -gpu swiftshader_indirect -no-metrics
+          disable-animations: true
+          script: |
+            set -eux
+            export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+            export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-      # ---------- ANDROID SDK + EMULADOR ----------
-      - name: Instalar Android SDK (cmdline-tools) y componentes
-        run: |
-          set -eux
-          mkdir -p "$ANDROID_SDK_ROOT"
-          cd "$ANDROID_SDK_ROOT"
-          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          mkdir -p cmdline-tools
-          unzip -q cmdline-tools.zip -d cmdline-tools
-          mv cmdline-tools/cmdline-tools cmdline-tools/latest
-          rm -f cmdline-tools.zip
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+            # Recuperar/asegurar ADB
+            adb kill-server || true
+            adb start-server
+            adb devices
 
-          yes | sdkmanager --licenses
-          yes | sdkmanager \
-            "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-            "system-images;android-${API_LEVEL};google_apis;x86_64"
+            # Esperar boot explícitamente (hasta 10 min)
+            timeout=0
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+              sleep 5
+              timeout=$((timeout+5))
+              if [ $timeout -gt 600 ]; then echo "Timeout esperando boot_completed"; exit 1; fi
+            done
 
-          adb version
-          emulator -version
-
-      - name: Crear AVD
-        run: |
-          set -eux
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          mkdir -p "$ANDROID_AVD_HOME"
-          yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
-            -d "$DEVICE_PROFILE" --force
-          echo "hw.cpu.ncore=2" >> "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
-          echo "disk.dataPartition.size=2048M" >> "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
-
-      - name: Iniciar emulador (headless, sin KVM) y esperar boot
-        run: |
-          set -eux
-          export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          nohup emulator -avd "$AVD_NAME" \
-            -no-snapshot -no-window -gpu swiftshader_indirect \
-            -noaudio -accel off -camera-back none -camera-front none \
-            -no-boot-anim -netdelay none -netspeed full > emulator.log 2>&1 &
-
-          adb wait-for-device
-
-          # Esperar hasta 10 minutos a que termine de bootear
-          for i in $(seq 1 120); do
-            boot_completed=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-            if [ "$boot_completed" = "1" ]; then
-              break
+            # Instalar APK
+            if [ -n "${APP_PACKAGE:-}" ]; then
+              adb uninstall "${APP_PACKAGE}" || true
             fi
-            sleep 5
-          done
-          [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1" ] || { echo "El emulador no booteó a tiempo"; exit 1; }
+            adb install -r "${APK_LOCAL_NAME}" | tee adb-install.log
 
-          # Desactivar animaciones para estabilidad
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
+            # Appium (opcional)
+            if [ "${USE_APPIUM}" = "true" ]; then
+              npm i -g appium
+              appium driver install uiautomator2
+              nohup appium --base-path /wd/hub --address $APPIUM_HOST --port $APPIUM_PORT > appium.log 2>&1 &
+              for i in $(seq 1 60); do nc -z $APPIUM_HOST $APPIUM_PORT && break || true; sleep 1; done
+            fi
 
-      - name: Instalar APK en el emulador
-        run: |
-          set -eux
-          adb devices
-          adb install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+            # Ejecutar Behave (con soporte de tags de workflow_dispatch)
+            mkdir -p reports/allure-results
+            TAGS_INPUT="${{ github.event.inputs.behave_tags }}"
+            if [ -n "$TAGS_INPUT" ]; then
+              behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "$TAGS_INPUT"
+            else
+              behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+            fi
 
-      - name: (Opcional) Instalar y arrancar Appium Server
-        if: env.USE_APPIUM == 'true'
-        run: |
-          set -eux
-          npm i -g appium
-          appium driver install uiautomator2
-          nohup appium --base-path /wd/hub --address $APPIUM_HOST --port $APPIUM_PORT > appium.log 2>&1 &
-          # esperar a que levante el puerto
-          for i in $(seq 1 60); do
-            nc -z $APPIUM_HOST $APPIUM_PORT && exit 0 || true
-            sleep 1
-          done
-          echo "Appium no inició a tiempo" && exit 1
-
-      - name: Logcat continuo (background)
-        run: |
-          set -eux
-          nohup adb logcat -v time > logcat.txt 2>&1 &
-
-      - name: Ejecutar tests (Behave)
-        env:
-          DEVICE_NAME: "emulator-5554"
-          PLATFORM_NAME: "Android"
-          AUTOMATION_NAME: "UiAutomator2"
-          APPIUM_SERVER_URL: "http://${{ env.APPIUM_HOST }}:${{ env.APPIUM_PORT }}/wd/hub"
-          APP_PACKAGE: "com.siltium.medicenter"
-          APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
-        run: |
-          set -eux
-          mkdir -p reports/allure-results
-          TAGS_INPUT="${{ github.event.inputs.behave_tags }}"
-          if [ -n "$TAGS_INPUT" ]; then
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "$TAGS_INPUT"
-          else
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
-          fi
-
-      - name: Subir artefactos (Allure, logs, Appium/ADB)
+      - name: Subir artefactos (Allure, logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -209,16 +166,5 @@ jobs:
             reports/allure-results/**
             appium.log
             adb-install.log
-            emulator.log
-            logcat.txt
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Apagar emulador y limpiar
-        if: always()
-        run: |
-          set -eux
-          adb emu kill || true
-          pkill -f "emulator" || true
-          pkill -f "appium" || true
-          adb kill-server || true
