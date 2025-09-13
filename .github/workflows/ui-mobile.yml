@@ -18,6 +18,7 @@ concurrency:
 env:
   ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
   ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
+  BUILD_TOOLS: "30.0.3"
   API_LEVEL: 30
   AVD_NAME: ci-pixel5-api30
   DEVICE_PROFILE: pixel_5
@@ -133,16 +134,19 @@ jobs:
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}" >> "$GITHUB_PATH"
           # ANDROID_HOME igual al ROOT
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
 
           # PATH local para este paso
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}:$PATH"
 
           yes | sdkmanager --licenses
           yes | sdkmanager \
-            "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-            "system-images;android-${API_LEVEL};google_apis;x86_64"
+            "platform-tools" "emulator" \
+            "platforms;android-${API_LEVEL}" \
+            "system-images;android-${API_LEVEL};google_apis;x86_64" \
+            "build-tools;${BUILD_TOOLS}"
 
           # Symlink al path por defecto del emulador
           sudo mkdir -p /usr/local/lib/android
@@ -150,11 +154,15 @@ jobs:
             sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
           fi
 
-          # Validación de system image
+          # Validaciones
           ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
+          ls -la "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}/aapt2" || exit 1
+          # (extra robustez) copia/symlink de aapt2 a platform-tools para los buscadores "raros"
+          ln -sf "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS}/aapt2" "$ANDROID_SDK_ROOT/platform-tools/aapt2"
 
           adb version
           emulator -version
+
 
       - name: Crear AVD
         run: |
