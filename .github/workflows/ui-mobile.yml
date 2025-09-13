@@ -117,7 +117,6 @@ jobs:
             libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
             libfontconfig1 ca-certificates
 
-
       # ---------- ANDROID SDK + EMULADOR (manual, con ADB robusto) ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
         run: |
@@ -134,6 +133,8 @@ jobs:
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+          # ANDROID_HOME igual al ROOT
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
 
           # PATH local para este paso
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
@@ -142,6 +143,15 @@ jobs:
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
             "system-images;android-${API_LEVEL};google_apis;x86_64"
+
+          # (FIX 1) Symlink al path por defecto del emulador
+          sudo mkdir -p /usr/local/lib/android
+          if [ ! -e /usr/local/lib/android/sdk ]; then
+            sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
+          fi
+
+          # Validación de system image
+          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
 
           adb version
           emulator -version
@@ -154,10 +164,17 @@ jobs:
           yes "no" | avdmanager create avd \
             -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
             -d "$DEVICE_PROFILE" --force
+          AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
             echo "hw.cpu.ncore=2"
             echo "disk.dataPartition.size=2048M"
-          } >> "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
+            echo "abi.type=x86_64"
+            echo "tag.id=google_apis"
+            # (FIX 2) Apuntar explícitamente al sysdir del system image correcto
+            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
+          } >> "$AVD_CFG"
+          echo "AVD config:"
+          grep -E '(^image.sysdir.1|^abi.type|^tag.id)' "$AVD_CFG" || true
 
       - name: Iniciar emulador (headless) y estabilizar ADB
         run: |
@@ -179,16 +196,16 @@ jobs:
           # esperar que adb vea el emulador (device/offline)
           t=0
           until adb devices | awk 'NR>1 {print $2}' | grep -qE 'device|offline'; do
-            sleep 3; t=$((t+3)); if [ $t -gt 120 ]; then echo "adb no ve el emulador"; tail -n +1 emulator.log; exit 1; fi
+            sleep 3; t=$((t+3)); if [ $t -gt 180 ]; then echo "adb no ve el emulador"; tail -n +200 emulator.log; exit 1; fi
           done
 
           # si está offline, intentar reconectar varias veces
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             state="$(adb get-state || true)"
             if [ "$state" = "device" ]; then break; fi
             adb reconnect offline || true
             adb reconnect || true
-            sleep 3
+            sleep 2
           done
 
           # Esperar boot completo (hasta 10 min)
@@ -199,7 +216,7 @@ jobs:
             sleep 5
           done
           if [ "$boot" != "1" ]; then
-            echo "El emulador no booteó a tiempo"; tail -n +1 emulator.log; exit 1
+            echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1
           fi
 
           # Desactivar animaciones para estabilidad
