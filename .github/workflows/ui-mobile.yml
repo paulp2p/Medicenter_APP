@@ -180,39 +180,46 @@ jobs:
         run: |
           set -eux
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          # matar cualquier ADB colgado
+          export ANDROID_EMULATOR_USE_SYSTEM_LIBS=1
+          export ADB_VENDOR_KEYS=
+          # limpiar cualquier ADB colgado
           pkill -f "adb" || true
+          adb kill-server || true
+          adb start-server
 
-          # lanzar emulador sin KVM, sin audio, sin snapshot
+          # Lanzar emulador SIN KVM y SIN snapshot, con puertos fijos 5554/5555
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot -accel off \
             -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
-            -writable-system -no-metrics > emulator.log 2>&1 &
+            -no-metrics -port 5554 -ports 5554,5555 > emulator.log 2>&1 &
+          EMUPID=$!
 
-          # ADB robusto: levantar servidor y esperar a que aparezca el dispositivo (device u offline)
-          export ADB_VENDOR_KEYS=
-          adb kill-server || true
-          adb start-server
-          # esperar que adb vea el emulador (device/offline)
-          t=0
-          until adb devices | awk 'NR>1 {print $2}' | grep -qE 'device|offline'; do
-            sleep 3; t=$((t+3)); if [ $t -gt 180 ]; then echo "adb no ve el emulador"; tail -n +200 emulator.log; exit 1; fi
-          done
-
-          # si está offline, intentar reconectar varias veces
-          for i in $(seq 1 30); do
-            state="$(adb get-state || true)"
-            if [ "$state" = "device" ]; then break; fi
-            adb reconnect offline || true
-            adb reconnect || true
+          # Verificar que el proceso sigue vivo y que abre el puerto de consola 5554
+          for i in $(seq 1 60); do
+            if ! kill -0 $EMUPID 2>/dev/null; then
+              echo "El proceso del emulador murió temprano."; tail -n +1 emulator.log; exit 1
+            fi
+            nc -z 127.0.0.1 5554 && break || true
             sleep 2
           done
+          nc -z 127.0.0.1 5554 || { echo "El emulador no abrió el puerto 5554 a tiempo"; tail -n +200 emulator.log; exit 1; }
+
+          # Conectar ADB explícitamente al puerto 5555 del emulador
+          for i in $(seq 1 10); do
+            adb connect 127.0.0.1:5555 || true
+            adb devices | awk 'NR>1 {print $1" "$2}'
+            adb -s emulator-5554 get-state && break || true
+            sleep 2
+          done
+
+          # Esperar a que el dispositivo esté disponible (timeout 3 min)
+          timeout 180s adb -s emulator-5554 wait-for-device || { echo "ADB no detecta el emulador"; tail -n +200 emulator.log; exit 1; }
 
           # Esperar boot completo (hasta 10 min)
           boot=""
           for i in $(seq 1 120); do
-            boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-            if [ "$boot" = "1" ]; then break; fi
+            boot="$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            [ "$boot" = "1" ] && break || true
             sleep 5
           done
           if [ "$boot" != "1" ]; then
@@ -220,9 +227,10 @@ jobs:
           fi
 
           # Desactivar animaciones para estabilidad
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
+          adb -s emulator-5554 shell settings put global window_animation_scale 0
+          adb -s emulator-5554 shell settings put global transition_animation_scale 0
+          adb -s emulator-5554 shell settings put global animator_duration_scale 0
+
 
       - name: Instalar APK en el emulador
         run: |
