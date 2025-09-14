@@ -34,6 +34,7 @@ def create_driver(config: dict):
     # Calidad de vida en CI
     options.set_capability("appium:autoGrantPermissions", True)
     options.set_capability("appium:disableWindowAnimation", True)
+    options.set_capability("appium:skipDeviceInitialization", True)
     options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
 
     # Reinstalación/estado de app entre runs

@@ -252,6 +252,22 @@ jobs:
           # Salud
           curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 || (echo "Appium no responde en /status" && exit 1)
 
+      - name: Preinstalar y arrancar io.appium.settings
+        run: |
+          set -eux
+          dev="emulator-5554"
+          SETTINGS_APK="$HOME/.appium/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
+          # Verifica que Appium uiautomator2 está instalado (para tener los APKs)
+          test -f "$SETTINGS_APK" || { echo "No se encontró io.appium.settings APK en $SETTINGS_APK"; ls -R "$HOME/.appium" || true; exit 1; }
+
+          # Instala/actualiza la app auxiliar y la arranca
+          adb -s "$dev" install -r "$SETTINGS_APK" || true
+          adb -s "$dev" shell am start -n io.appium.settings/.Settings -W || true
+
+          # Confirma que PackageManager y Settings responden
+          adb -s "$dev" shell 'pm path android' >/dev/null
+          adb -s "$dev" shell 'settings list system' >/dev/null
+
       - name: Ejecutar tests (Behave)
         env:
           DEVICE_NAME: "emulator-5554"
