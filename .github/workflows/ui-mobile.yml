@@ -127,28 +127,43 @@ jobs:
           mv cmdline-tools/cmdline-tools cmdline-tools/latest
           rm -f cmdline-tools.zip
 
+          # Persistir PATH para TODOS los pasos siguientes
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+
+          # ANDROID_HOME igual al ROOT
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
 
+          # PATH local para este paso
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
           yes | sdkmanager --licenses
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-            "system-images;android-${API_LEVEL};google_apis;x86_64"
+            "system-images;android-${API_LEVEL};google_apis;x86_64" \
+            "build-tools;30.0.3"
 
+          # (Opcional pero útil) Exponer AAPT/AAPT2 para Appium
+          echo "AAPT=$ANDROID_SDK_ROOT/build-tools/30.0.3/aapt" >> "$GITHUB_ENV"
+          echo "AAPT2=$ANDROID_SDK_ROOT/build-tools/30.0.3/aapt2" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/build-tools/30.0.3" >> "$GITHUB_PATH"
+
+          # (FIX 1) Symlink al path por defecto del emulador
           sudo mkdir -p /usr/local/lib/android
           if [ ! -e /usr/local/lib/android/sdk ]; then
             sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
           fi
 
+          # Validación de system image y aapt2
           ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
+          test -x "$ANDROID_SDK_ROOT/build-tools/30.0.3/aapt2" || (echo "aapt2 no está, Build-Tools falló"; exit 1)
 
           adb version
           emulator -version
+          "$ANDROID_SDK_ROOT/build-tools/30.0.3/aapt2" version || true
 
+          
       - name: Crear AVD
         run: |
           set -eux

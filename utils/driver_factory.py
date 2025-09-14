@@ -28,7 +28,6 @@ def create_driver(config: dict):
     options.set_capability("platformName", config.get("PLATFORM_NAME", "Android"))
     options.set_capability("appium:automationName", config.get("AUTOMATION_NAME", "UiAutomator2"))
     options.set_capability("appium:deviceName", config.get("DEVICE_NAME", os.getenv("DEVICE_NAME", "Android Emulator")))
-    # Opcional: versión del emulador
     if config.get("PLATFORM_VERSION") or os.getenv("PLATFORM_VERSION"):
         options.set_capability("appium:platformVersion", config.get("PLATFORM_VERSION", os.getenv("PLATFORM_VERSION")))
 
@@ -40,7 +39,6 @@ def create_driver(config: dict):
     # Reinstalación/estado de app entre runs
     options.set_capability("appium:noReset", _bool(config.get("NO_RESET", os.getenv("NO_RESET", "false"))))
     options.set_capability("appium:fullReset", _bool(config.get("FULL_RESET", os.getenv("FULL_RESET", "false"))))
-    # Fuerza reinstalación si la app ya estaba (evita “stale build”)
     options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "true"), True))
 
     # Esperas largas (Windows/emulador sin aceleración pueden tardar)
@@ -49,7 +47,7 @@ def create_driver(config: dict):
     options.set_capability("appium:uiautomator2ServerLaunchTimeout", int(os.getenv("UIA2_LAUNCH_TIMEOUT", "240000")))
     options.set_capability("appium:appWaitActivity", config.get("APP_WAIT_ACTIVITY", "*"))
 
-    # Idioma/locale (el workflow setea LANGUAGE=en, LOCALE=US)
+    # Idioma/locale
     options.set_capability("appium:language", os.getenv("LANGUAGE", config.get("LANGUAGE", "en")))
     options.set_capability("appium:locale", os.getenv("LOCALE", config.get("LOCALE", "US")))
 
@@ -57,67 +55,67 @@ def create_driver(config: dict):
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
-    # UDID si conectás un device físico / o emulador específico
-    udid = os.getenv("UDID") or config.get("UDID")
-    if udid:
-        options.set_capability("appium:udid", udid)
+    # UDID si conectás un device físico
+    if config.get("UDID"):
+        options.set_capability("appium:udid", config["UDID"])
 
-
-    # === Ruta APP (capability 'app') o package/activity ===
+    # Ruta APP (capability 'app') o package/activity
     app_path = os.getenv("APP", config.get("APP"))
+    pkg_env = os.getenv("APP_PACKAGE", config.get("APP_PACKAGE"))
+    act_env = os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY"))
 
-    def _normalize_app_path(p: str) -> str:
-        """Normaliza rutas que puedan venir estilo Windows y vuelve absoluta en Linux/macOS."""
-        if not p:
-            return p
-        # Reemplazar barras invertidas y quitar prefijo de unidad tipo 'C:'
-        p2 = p.replace("\\", "/")
-        if len(p2) >= 2 and p2[1] == ":":
-            p2 = p2[2:]  # quita 'C:' y deja '/...' o '...'
-        # Si no es absoluta, volverla absoluta respecto al workspace (o cwd)
-        if not os.path.isabs(p2):
-            ws = os.getenv("GITHUB_WORKSPACE", os.getcwd())
-            p2 = os.path.join(ws, p2)
-        return os.path.normpath(p2)
-
-    resolved_app = None
     if app_path:
-        candidate = _normalize_app_path(app_path)
-        if os.path.exists(candidate):
-            resolved_app = candidate
-        else:
-            # Fallback fuerte: usar el APK descargado por el workflow
-            ws = os.getenv("GITHUB_WORKSPACE", os.getcwd())
-            apk_name = os.getenv("APK_LOCAL_NAME", "medicenter_app.apk")
-            fallback = os.path.join(ws, apk_name)
-            if os.path.exists(fallback):
-                print(f"[driver_factory] WARNING: APP no existe ({candidate}). Usando fallback: {fallback}")
-                resolved_app = fallback
+        # --- Normalizar path Windows->Linux (cuando corre en GitHub Actions) ---
+        if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
+            win_basename = os.path.basename(app_path.replace("\\", "/"))
+            candidate = os.path.abspath(win_basename)
+            if os.path.exists(candidate):
+                print(f"[driver_factory] Normalizado APP desde Windows a: {candidate}")
+                app_path = candidate
             else:
-                print(f"[WARN] APP path no existe: {candidate} (tampoco fallback: {fallback})")
+                gw = os.getenv("GITHUB_WORKSPACE")
+                if gw:
+                    candidate2 = os.path.join(gw, win_basename)
+                    if os.path.exists(candidate2):
+                        print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
+                        app_path = candidate2
+        # ----------------------------------------------------------------------
 
-    if resolved_app:
-        options.set_capability("appium:app", resolved_app)
+        if not os.path.isabs(app_path):
+            app_path = os.path.abspath(app_path)
+        if not os.path.exists(app_path):
+            print(f"[WARN] APP path no existe: {app_path}")
+        options.set_capability("appium:app", app_path)
+
+        # *** BYPASS aapt2 ***
+        # Si tenemos package/activity, los seteamos también para que Appium NO tenga
+        # que parsear el manifest con aapt2.
+        if pkg_env and act_env:
+            options.set_capability("appium:appPackage", pkg_env)
+            options.set_capability("appium:appActivity", act_env)
+            # Tip: amplia espera de arranque si tu app tarda en la 1ª apertura
+            options.set_capability("appium:appWaitActivity", os.getenv("APP_WAIT_ACTIVITY", "*"))
     else:
-        # Sin 'app' válida → usar package/activity (requiere que la app esté instalada en el dispositivo)
-        options.set_capability("appium:appPackage", os.getenv("APP_PACKAGE", config.get("APP_PACKAGE")))
-        options.set_capability("appium:appActivity", os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY")))
+        # Sin 'app', usamos package/activity
+        if pkg_env:
+            options.set_capability("appium:appPackage", pkg_env)
+        if act_env:
+            options.set_capability("appium:appActivity", act_env)
 
     # (Opcional) Port dedicado si querés paralelismo futuro
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 
-    pkg_for_log = os.getenv("APP_PACKAGE") or config.get("APP_PACKAGE", "<no-package>")
-    act_for_log = os.getenv("APP_ACTIVITY") or config.get("APP_ACTIVITY", "")
+    pkg_for_log = pkg_env or "<no-package>"
+    act_for_log = act_env or ""
     print(f"[driver_factory] Appium server: {server_url}")
-    print(f"[driver_factory] Using app: {resolved_app or (pkg_for_log + '/' + act_for_log)}")
+    print(f"[driver_factory] Using app: {app_path or (pkg_for_log + '/' + act_for_log)}")
 
     driver = webdriver.Remote(server_url, options=options)
 
     # Ajustes de sesión que reducen esperas internas del framework
     try:
         driver.update_settings({
-            # Evita esperas por “idle” del UI Automator si tu app es dinámica
             "waitForIdleTimeout": 0,
             "actionAcknowledgmentTimeout": 0
         })
