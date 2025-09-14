@@ -252,6 +252,33 @@ jobs:
           # Salud
           curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 || (echo "Appium no responde en /status" && exit 1)
 
+      - name: "Workaround CI: preinstalar y lanzar Appium Settings"
+        run: |
+          set -eux
+          # Resolver rutas de los APKs dentro del módulo de Appium
+          APP_NODE_DIR="$(npm root -g)"
+          SETTINGS_APK="$(node -p "require.resolve('io.appium.settings/package.json').replace('package.json','apks/settings_apk-debug.apk')")"
+
+          # Instalar/actualizar Settings
+          adb -s emulator-5554 install -r "$SETTINGS_APK" || true
+
+          # Conceder permisos clave (por si la instalación no los deja activos de inmediato)
+          adb -s emulator-5554 shell pm grant io.appium.settings android.permission.WRITE_SECURE_SETTINGS || true
+          adb -s emulator-5554 shell pm grant io.appium.settings android.permission.CHANGE_NETWORK_STATE || true
+          adb -s emulator-5554 shell pm grant io.appium.settings android.permission.ACCESS_FINE_LOCATION || true
+          adb -s emulator-5554 shell pm grant io.appium.settings android.permission.ACCESS_COARSE_LOCATION || true
+
+          # Lanzarla (cualquier entrada del launcher sirve para activar su servicio)
+          adb -s emulator-5554 shell monkey -p io.appium.settings -c android.intent.category.LAUNCHER 1 || true
+
+          # Esperar a que el servicio esté visible para Appium
+          for i in $(seq 1 30); do
+            adb -s emulator-5554 shell dumpsys activity services io.appium.settings | grep -q io.appium.settings && exit 0 || true
+            sleep 1
+          done
+          echo "io.appium.settings no quedó corriendo a tiempo"; exit 1
+
+
       - name: Preinstalar y arrancar io.appium.settings
         run: |
           set -eux
