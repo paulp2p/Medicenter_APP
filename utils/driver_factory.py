@@ -28,7 +28,7 @@ def create_driver(config: dict):
     options.set_capability("platformName", config.get("PLATFORM_NAME", "Android"))
     options.set_capability("appium:automationName", config.get("AUTOMATION_NAME", "UiAutomator2"))
     options.set_capability("appium:deviceName", config.get("DEVICE_NAME", os.getenv("DEVICE_NAME", "Android Emulator")))
-    # Opcional: si querés fijar versión del emulador (no obligatorio)
+    # Opcional: versión del emulador
     if config.get("PLATFORM_VERSION") or os.getenv("PLATFORM_VERSION"):
         options.set_capability("appium:platformVersion", config.get("PLATFORM_VERSION", os.getenv("PLATFORM_VERSION")))
 
@@ -61,36 +61,43 @@ def create_driver(config: dict):
     if config.get("UDID"):
         options.set_capability("appium:udid", config["UDID"])
 
-    # Ruta APP (capability 'app') o package/activity
+    # === Ruta APP (capability 'app') o package/activity ===
     app_path = os.getenv("APP", config.get("APP"))
-    if app_path:
-        # ---------------------------------------------------------------------
-        # 🔧 Normalizar path de Windows cuando se ejecuta en Linux/macOS
-        # (evita que "C:\...\apk" se convierta en "/home/runner/.../C:\...\apk")
-        if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
-            win_basename = os.path.basename(app_path.replace("\\", "/"))
-            # Preferimos el archivo en el cwd (el APK descargado por el workflow)
-            candidate = os.path.abspath(win_basename)
-            if os.path.exists(candidate):
-                print(f"[driver_factory] Normalizado APP desde Windows a: {candidate}")
-                app_path = candidate
-            else:
-                # Plan B: probar en GITHUB_WORKSPACE si existe
-                gw = os.getenv("GITHUB_WORKSPACE")
-                if gw:
-                    candidate2 = os.path.join(gw, win_basename)
-                    if os.path.exists(candidate2):
-                        print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
-                        app_path = candidate2
-        # ---------------------------------------------------------------------
 
-        # Normaliza ruta relativa/absoluta (soporta Windows y Linux)
-        if not os.path.isabs(app_path):
-            app_path = os.path.abspath(app_path)
-        if not os.path.exists(app_path):
-            print(f"[WARN] APP path no existe: {app_path}")
-        options.set_capability("appium:app", app_path)
+    def _normalize_app_path(p: str) -> str:
+        """Normaliza rutas que puedan venir estilo Windows y vuelve absoluta en Linux/macOS."""
+        if not p:
+            return p
+        # Reemplazar barras invertidas y quitar prefijo de unidad tipo 'C:'
+        p2 = p.replace("\\", "/")
+        if len(p2) >= 2 and p2[1] == ":":
+            p2 = p2[2:]  # quita 'C:' y deja '/...' o '...'
+        # Si no es absoluta, volverla absoluta respecto al workspace (o cwd)
+        if not os.path.isabs(p2):
+            ws = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+            p2 = os.path.join(ws, p2)
+        return os.path.normpath(p2)
+
+    resolved_app = None
+    if app_path:
+        candidate = _normalize_app_path(app_path)
+        if os.path.exists(candidate):
+            resolved_app = candidate
+        else:
+            # Fallback fuerte: usar el APK descargado por el workflow
+            ws = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+            apk_name = os.getenv("APK_LOCAL_NAME", "medicenter_app.apk")
+            fallback = os.path.join(ws, apk_name)
+            if os.path.exists(fallback):
+                print(f"[driver_factory] WARNING: APP no existe ({candidate}). Usando fallback: {fallback}")
+                resolved_app = fallback
+            else:
+                print(f"[WARN] APP path no existe: {candidate} (tampoco fallback: {fallback})")
+
+    if resolved_app:
+        options.set_capability("appium:app", resolved_app)
     else:
+        # Sin 'app' válida → usar package/activity (requiere que la app esté instalada en el dispositivo)
         options.set_capability("appium:appPackage", os.getenv("APP_PACKAGE", config.get("APP_PACKAGE")))
         options.set_capability("appium:appActivity", os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY")))
 
@@ -101,7 +108,7 @@ def create_driver(config: dict):
     pkg_for_log = os.getenv("APP_PACKAGE") or config.get("APP_PACKAGE", "<no-package>")
     act_for_log = os.getenv("APP_ACTIVITY") or config.get("APP_ACTIVITY", "")
     print(f"[driver_factory] Appium server: {server_url}")
-    print(f"[driver_factory] Using app: {app_path or (pkg_for_log + '/' + act_for_log)}")
+    print(f"[driver_factory] Using app: {resolved_app or (pkg_for_log + '/' + act_for_log)}")
 
     driver = webdriver.Remote(server_url, options=options)
 
