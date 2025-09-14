@@ -57,9 +57,11 @@ def create_driver(config: dict):
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
-    # UDID si conectás un device físico
-    if config.get("UDID"):
-        options.set_capability("appium:udid", config["UDID"])
+    # UDID si conectás un device físico / o emulador específico
+    udid = os.getenv("UDID") or config.get("UDID")
+    if udid:
+        options.set_capability("appium:udid", udid)
+
 
     # === Ruta APP (capability 'app') o package/activity ===
     app_path = os.getenv("APP", config.get("APP"))
