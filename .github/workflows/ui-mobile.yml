@@ -18,8 +18,8 @@ concurrency:
 env:
   ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
   ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
-  API_LEVEL: 30
-  AVD_NAME: ci-pixel5-api30
+  API_LEVEL: 31
+  AVD_NAME: ci-pixel5-api31
   DEVICE_PROFILE: pixel_5
   APK_LOCAL_NAME: medicenter_app.apk
   PY_VERSION: "3.11"
@@ -74,7 +74,7 @@ jobs:
             pip install behave selenium appium-python-client allure-behave
           fi
 
-      # ---------- RCLONE: restaurar config y smoke test ----------
+      # ---------- RCLONE ----------
       - name: Instalar rclone
         run: |
           set -eux
@@ -137,7 +137,7 @@ jobs:
           yes | sdkmanager --licenses
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-            "build-tools;30.0.3" \
+            "build-tools;31.0.0" \
             "system-images;android-${API_LEVEL};google_apis;x86_64"
 
           sudo mkdir -p /usr/local/lib/android
@@ -202,7 +202,7 @@ jobs:
           adb -s $dev shell input keyevent 82 || true
           adb -s $dev shell input keyevent 3  || true
 
-          # Esperar PackageManager y Settings con verificación estricta
+          # Espera dura a pm y settings
           for i in $(seq 1 180); do
             adb -s $dev shell 'pm list packages >/dev/null 2>&1' && ok_pm=1 || ok_pm=0
             adb -s $dev shell 'settings list system >/dev/null 2>&1' && ok_set=1 || ok_set=0
@@ -214,6 +214,7 @@ jobs:
           adb -s $dev shell settings put global window_animation_scale 0 || true
           adb -s $dev shell settings put global transition_animation_scale 0 || true
           adb -s $dev shell settings put global animator_duration_scale 0 || true
+
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
       - name: Instalar APK en el emulador
@@ -240,9 +241,18 @@ jobs:
         run: |
           set -eux
           dev="emulator-5554"
-          # Ruta al APK dentro del módulo del driver
-          SETTINGS_APK="$(node -p "require.resolve('io.appium.settings/package.json').replace('package.json','apks/settings_apk-debug.apk')")"
-          test -f "$SETTINGS_APK" || { echo "No se encontró $SETTINGS_APK"; ls -R "$HOME/.appium" || true; exit 1; }
+          APP_HOME="$HOME/.appium"
+          SETTINGS_APK=""
+
+          # Buscar en rutas conocidas dentro de ~/.appium
+          for p in \
+            "$APP_HOME/node_modules/io.appium.settings/apks/settings_apk-debug.apk" \
+            "$APP_HOME/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
+          do
+            if [ -f "$p" ]; then SETTINGS_APK="$p"; break; fi
+          done
+
+          test -n "$SETTINGS_APK" || { echo "No se encontró io.appium.settings APK dentro de $APP_HOME"; ls -R "$APP_HOME" || true; exit 1; }
 
           # Instalar/actualizar Settings y otorgar permisos esenciales
           adb -s "$dev" install -r "$SETTINGS_APK" || true
@@ -251,10 +261,8 @@ jobs:
           adb -s "$dev" shell pm grant io.appium.settings android.permission.ACCESS_FINE_LOCATION || true
           adb -s "$dev" shell pm grant io.appium.settings android.permission.ACCESS_COARSE_LOCATION || true
 
-          # Lanzar la app para activar su servicio
+          # Lanzar la app para activar su servicio y verificar
           adb -s "$dev" shell monkey -p io.appium.settings -c android.intent.category.LAUNCHER 1 || true
-
-          # Esperar a que el servicio se vea en dumpsys
           for i in $(seq 1 60); do
             adb -s "$dev" shell dumpsys activity services io.appium.settings | grep -q io.appium.settings && exit 0 || true
             sleep 1
