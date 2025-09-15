@@ -37,6 +37,12 @@ def create_driver(config: dict):
     options.set_capability("appium:skipDeviceInitialization", True)
     options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
 
+    # Timeouts amplios para CI
+    options.set_capability("appium:adbExecTimeout", int(os.getenv("ADB_EXEC_TIMEOUT", "300000")))
+    options.set_capability("appium:uiautomator2ServerInstallTimeout", int(os.getenv("UIA2_INSTALL_TIMEOUT", "300000")))
+    options.set_capability("appium:uiautomator2ServerLaunchTimeout", int(os.getenv("UIA2_LAUNCH_TIMEOUT", "300000")))
+    options.set_capability("appium:androidInstallTimeout", int(os.getenv("ANDROID_INSTALL_TIMEOUT", "300000")))
+
     # Reinstalación/estado de app entre runs
     options.set_capability("appium:noReset", _bool(config.get("NO_RESET", os.getenv("NO_RESET", "false"))))
     options.set_capability("appium:fullReset", _bool(config.get("FULL_RESET", os.getenv("FULL_RESET", "false"))))

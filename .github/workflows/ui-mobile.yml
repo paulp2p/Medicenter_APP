@@ -169,6 +169,7 @@ jobs:
           } >> "$AVD_CFG"
           grep -E '(^image.sysdir.1|^abi.type|^tag.id)' "$AVD_CFG" || true
 
+      # ---------- INICIAR EMULADOR Y ESTABILIZAR ADB ----------
       - name: Iniciar emulador (headless) y estabilizar ADB
         shell: bash
         run: |
@@ -198,6 +199,7 @@ jobs:
           done
           [ "$boot" = "1" ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1; }
 
+      # Desbloquear, esperar servicios y desactivar animaciones
       - name: Desbloquear y esperar servicios Android (package/settings)
         run: |
           set -eux
@@ -228,6 +230,36 @@ jobs:
           adb -s $dev shell settings put global animator_duration_scale 0 || true
 
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
+
+      # ---------- ESPERA EL PACKAGEMANAGER, instalar app, Appium, etc. ----------    
+      - name: Esperar PackageManager / framework Android
+        run: |
+          set -eux
+          # Asegurarnos que el dispositivo está visible
+          adb -s emulator-5554 wait-for-device
+
+          # Esperar a que Package Manager y Settings respondan
+          ok_pm=0; ok_set=0; ok_boot=0
+          for i in $(seq 1 180); do
+            adb -s emulator-5554 shell 'pm list packages >/dev/null 2>&1' && ok_pm=1 || ok_pm=0
+            adb -s emulator-5554 shell 'settings list system >/dev/null 2>&1' && ok_set=1 || ok_set=0
+            boot="$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            [ "$boot" = "1" ] && ok_boot=1 || ok_boot=0
+            if [ $ok_pm -eq 1 ] && [ $ok_set -eq 1 ] && [ $ok_boot -eq 1 ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ $ok_pm -ne 1 ] || [ $ok_set -ne 1 ] || [ $ok_boot -ne 1 ]; then
+            echo "Android framework no listo a tiempo (pm/settings/boot)."
+            adb -s emulator-5554 shell getprop | sed -n '1,200p' || true
+            exit 1
+          fi
+
+          # Unos ajustes de estabilidad adicionales
+          adb -s emulator-5554 shell svc power stayon true || true
+          adb -s emulator-5554 shell settings put global hidden_api_policy 1 || true
 
       - name: Instalar APK en el emulador
         run: |
@@ -274,20 +306,27 @@ jobs:
           DEVICE_NAME: "emulator-5554"
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          # ← SIN /wd/hub
           APPIUM_SERVER_URL: "http://${{ env.APPIUM_HOST }}:${{ env.APPIUM_PORT }}"
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
           APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
         run: |
           set -eux
-          # Forzar que el driver use el APK descargado localmente
+          # Forzar que Appium use el APK descargado por rclone
           export APP="${APK_LOCAL_NAME}"
+
+          # Aumentar timeouts para instalaciones/ADB/UIA2
+          export ANDROID_INSTALL_TIMEOUT=300000     # 5 min
+          export ADB_EXEC_TIMEOUT=300000            # 5 min
+          export UIA2_INSTALL_TIMEOUT=300000        # 5 min
+          export UIA2_LAUNCH_TIMEOUT=300000         # 5 min
+
           mkdir -p reports/allure-results
           if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
           else
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
+
 
       - name: Subir artefactos (Allure, logs)
         if: always()
