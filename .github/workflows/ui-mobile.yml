@@ -165,7 +165,6 @@ jobs:
             echo "abi.type=x86_64"
             echo "tag.id=google_apis"
             echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
-            # IMPORTANTE: evitar problemas de Direct Boot/encryption
             echo "disk.dataPartition.encryption=false"
           } >> "$AVD_CFG"
           grep -E '(^image.sysdir.1|^abi.type|^tag.id|^disk.dataPartition.encryption)' "$AVD_CFG" || true
@@ -188,10 +187,10 @@ jobs:
             -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
             -no-metrics -port 5554 -ports 5554,5555 > emulator.log 2>&1 &
 
-          # Esperar a que ADB vea el emulador
+          # Esperar ADB
           timeout 180s bash -c 'until adb -s emulator-5554 get-state 2>/dev/null; do sleep 2; done'
 
-          # Esperar a que sys.boot_completed = 1
+          # Esperar boot completo
           for i in $(seq 1 180); do
             boot="$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
             [ "$boot" = "1" ] && break || true
@@ -199,7 +198,7 @@ jobs:
           done
           [ "$boot" = "1" ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1; }
 
-          # Reiniciar adbd como root (en emulador permitido) y re-esperar
+          # Root (en emulador permitido)
           adb -s emulator-5554 root || true
           adb -s emulator-5554 wait-for-device
 
@@ -207,7 +206,6 @@ jobs:
         run: |
           set -eux
           dev="emulator-5554"
-          # Esperar a que service 'package' y 'activity' estén disponibles
           for i in $(seq 1 300); do
             pm_ok="$(adb -s $dev shell service check package 2>/dev/null || true)"
             am_ok="$(adb -s $dev shell service check activity 2>/dev/null || true)"
@@ -215,22 +213,13 @@ jobs:
             echo "$pm_ok" | grep -q "found" && echo "$am_ok" | grep -q "found" && [ "$boot" = "1" ] && break || true
             sleep 2
           done
-          echo "Confirmación extra:"
-          adb -s $dev shell service check package
-          adb -s $dev shell service check activity
-
-          # Ya con services arriba, ahora sí 'settings' funciona
           adb -s $dev shell settings put global window_animation_scale 0 || true
           adb -s $dev shell settings put global transition_animation_scale 0 || true
           adb -s $dev shell settings put global animator_duration_scale 0 || true
-
-          # Mantener pantalla encendida y desbloqueada
+          adb -s $dev shell svc power stayon true || true
           adb -s $dev shell input keyevent 224 || true
           adb -s $dev shell input keyevent 82  || true
           adb -s $dev shell input keyevent 3   || true
-          adb -s $dev shell svc power stayon true || true
-
-          # Exportar UDID para siguientes pasos
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
       # ---------- APK, Appium, Settings ----------
@@ -260,26 +249,36 @@ jobs:
           set -eux
           dev="emulator-5554"
 
-          # No intentamos nada si los servicios no están listos:
+          # Asegurar servicios listos (por si este step corre muy pegado)
           adb -s $dev shell service check package | grep -q "found"
           adb -s $dev shell service check activity | grep -q "found"
 
-          # Resolver ruta del APK de io.appium.settings instalado por el driver
-          SETTINGS_APK="$(node -p "require.resolve('io.appium.settings/package.json').replace('package.json','apks/settings_apk-debug.apk')")"
-          test -f "$SETTINGS_APK" || { echo "No se encontró io.appium.settings APK en $SETTINGS_APK"; ls -R "$HOME/.appium" || true; exit 1; }
+          # 1) Ruta común cuando Settings es dependencia del driver
+          SETTINGS_APK="$HOME/.appium/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
+          # 2) Fallback directo (si Settings se instaló como módulo raíz en ~/.appium)
+          if [ ! -f "$SETTINGS_APK" ]; then
+            SETTINGS_APK="$HOME/.appium/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
+          fi
+          # 3) Fallback genérico: buscarlo
+          if [ ! -f "$SETTINGS_APK" ]; then
+            SETTINGS_APK="$(find "$HOME/.appium" -type f -name 'settings_apk-*.apk' | head -n1 || true)"
+          fi
 
-          # Instalar/actualizar y lanzar
-          adb -s "$dev" install -r "$SETTINGS_APK" || true
-          adb -s "$dev" shell pm grant io.appium.settings android.permission.WRITE_SECURE_SETTINGS || true
-          adb -s "$dev" shell pm grant io.appium.settings android.permission.CHANGE_NETWORK_STATE || true
-          adb -s "$dev" shell am start -n io.appium.settings/.Settings -W || true
+          if [ -z "${SETTINGS_APK:-}" ] || [ ! -f "$SETTINGS_APK" ]; then
+            echo "[WARN] No se encontró io.appium.settings APK. Continuamos (skipDeviceInitialization=true)."
+          else
+            echo "Usando SETTINGS_APK: $SETTINGS_APK"
+            adb -s "$dev" install -r "$SETTINGS_APK" || true
+            adb -s "$dev" shell pm grant io.appium.settings android.permission.WRITE_SECURE_SETTINGS || true
+            adb -s "$dev" shell pm grant io.appium.settings android.permission.CHANGE_NETWORK_STATE || true
+            adb -s "$dev" shell am start -n io.appium.settings/.Settings -W || true
 
-          # Esperar a ver el servicio activo
-          for i in $(seq 1 30); do
-            adb -s "$dev" shell dumpsys activity services io.appium.settings | grep -q io.appium.settings && exit 0 || true
-            sleep 1
-          done
-          echo "io.appium.settings no quedó corriendo a tiempo"; exit 1
+            # Confirmar servicio activo (mejor esfuerzo)
+            for i in $(seq 1 15); do
+              adb -s "$dev" shell dumpsys activity services io.appium.settings | grep -q io.appium.settings && break || true
+              sleep 1
+            done
+          fi
 
       # ---------- TESTS ----------
       - name: Ejecutar tests (Behave)
@@ -293,10 +292,7 @@ jobs:
           UDID: "emulator-5554"
         run: |
           set -eux
-          # Forzar que Appium use el APK descargado por rclone
           export APP="${APK_LOCAL_NAME}"
-
-          # Timeouts amplios para instalaciones/ADB/UIA2
           export ANDROID_INSTALL_TIMEOUT=300000
           export ADB_EXEC_TIMEOUT=300000
           export UIA2_INSTALL_TIMEOUT=300000

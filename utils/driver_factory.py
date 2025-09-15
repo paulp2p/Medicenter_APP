@@ -52,7 +52,7 @@ def create_driver(config: dict):
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
-    # UDID (si se exporta, lo usamos)
+    # UDID (desde ENV o config)
     udid_env = os.getenv("UDID") or config.get("UDID")
     if udid_env:
         options.set_capability("appium:udid", udid_env)
@@ -63,7 +63,7 @@ def create_driver(config: dict):
     act_env = os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY"))
 
     if app_path:
-        # --- Normalizar path Windows->Linux (cuando corre en GitHub Actions) ---
+        # Normalizar path Windows->Linux (cuando corre en GitHub Actions)
         if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
             win_basename = os.path.basename(app_path.replace("\\", "/"))
             candidate = os.path.abspath(win_basename)
@@ -77,7 +77,6 @@ def create_driver(config: dict):
                     if os.path.exists(candidate2):
                         print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
                         app_path = candidate2
-        # ----------------------------------------------------------------------
 
         if not os.path.isabs(app_path):
             app_path = os.path.abspath(app_path)
@@ -107,7 +106,6 @@ def create_driver(config: dict):
 
     driver = webdriver.Remote(server_url, options=options)
 
-    # Ajustes de sesión que reducen esperas internas del framework
     try:
         driver.update_settings({
             "waitForIdleTimeout": 0,
