@@ -37,21 +37,11 @@ def create_driver(config: dict):
     options.set_capability("appium:skipDeviceInitialization", True)
     options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
 
-    # Timeouts amplios para CI
+    # Timeouts amplios para CI (sin duplicación)
     options.set_capability("appium:adbExecTimeout", int(os.getenv("ADB_EXEC_TIMEOUT", "300000")))
     options.set_capability("appium:uiautomator2ServerInstallTimeout", int(os.getenv("UIA2_INSTALL_TIMEOUT", "300000")))
     options.set_capability("appium:uiautomator2ServerLaunchTimeout", int(os.getenv("UIA2_LAUNCH_TIMEOUT", "300000")))
     options.set_capability("appium:androidInstallTimeout", int(os.getenv("ANDROID_INSTALL_TIMEOUT", "300000")))
-
-    # Reinstalación/estado de app entre runs
-    options.set_capability("appium:noReset", _bool(config.get("NO_RESET", os.getenv("NO_RESET", "false"))))
-    options.set_capability("appium:fullReset", _bool(config.get("FULL_RESET", os.getenv("FULL_RESET", "false"))))
-    options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "true"), True))
-
-    # Esperas largas (Windows/emulador sin aceleración pueden tardar)
-    options.set_capability("appium:adbExecTimeout", int(os.getenv("ADB_EXEC_TIMEOUT", "240000")))
-    options.set_capability("appium:uiautomator2ServerInstallTimeout", int(os.getenv("UIA2_INSTALL_TIMEOUT", "240000")))
-    options.set_capability("appium:uiautomator2ServerLaunchTimeout", int(os.getenv("UIA2_LAUNCH_TIMEOUT", "240000")))
     options.set_capability("appium:appWaitActivity", config.get("APP_WAIT_ACTIVITY", "*"))
 
     # Idioma/locale
@@ -62,9 +52,10 @@ def create_driver(config: dict):
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
-    # UDID si conectás un device físico
-    if config.get("UDID"):
-        options.set_capability("appium:udid", config["UDID"])
+    # UDID (si se exporta, lo usamos)
+    udid_env = os.getenv("UDID") or config.get("UDID")
+    if udid_env:
+        options.set_capability("appium:udid", udid_env)
 
     # Ruta APP (capability 'app') o package/activity
     app_path = os.getenv("APP", config.get("APP"))
@@ -94,16 +85,12 @@ def create_driver(config: dict):
             print(f"[WARN] APP path no existe: {app_path}")
         options.set_capability("appium:app", app_path)
 
-        # *** BYPASS aapt2 ***
-        # Si tenemos package/activity, los seteamos también para que Appium NO tenga
-        # que parsear el manifest con aapt2.
+        # BYPASS aapt2: si conocemos package/activity, los seteamos también
         if pkg_env and act_env:
             options.set_capability("appium:appPackage", pkg_env)
             options.set_capability("appium:appActivity", act_env)
-            # Tip: amplia espera de arranque si tu app tarda en la 1ª apertura
             options.set_capability("appium:appWaitActivity", os.getenv("APP_WAIT_ACTIVITY", "*"))
     else:
-        # Sin 'app', usamos package/activity
         if pkg_env:
             options.set_capability("appium:appPackage", pkg_env)
         if act_env:
