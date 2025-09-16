@@ -140,7 +140,6 @@ jobs:
             "build-tools;30.0.3" \
             "system-images;android-${API_LEVEL};default;x86_64"
 
-          # Symlink esperado por algunas herramientas
           sudo mkdir -p /usr/local/lib/android
           if [ ! -e /usr/local/lib/android/sdk ]; then
             sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
@@ -190,12 +189,42 @@ jobs:
 
           timeout 180s bash -c 'until adb -s emulator-5554 get-state 2>/dev/null; do sleep 2; done'
 
+          # boot flag
           for i in $(seq 1 120); do
             boot="$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
             [ "$boot" = "1" ] && break || true
             sleep 5
           done
           [ "$boot" = "1" ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1; }
+
+      - name: Desbloquear y desactivar animaciones
+        run: |
+          set -eux
+          dev="emulator-5554"
+          adb -s $dev shell input keyevent 224 || true
+          adb -s $dev shell wm dismiss-keyguard || true
+          adb -s $dev shell input keyevent 82 || true
+          adb -s $dev shell input keyevent 3  || true
+          adb -s $dev shell settings put global window_animation_scale 0 || true
+          adb -s $dev shell settings put global transition_animation_scale 0 || true
+          adb -s $dev shell settings put global animator_duration_scale 0 || true
+          adb -s $dev shell svc power stayon true || true
+          echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
+
+      # ✅ ESPERA ROBUSTA: PackageManager y Activity listos antes de instalar nada
+      - name: Esperar PackageManager/Activity
+        run: |
+          set -eux
+          dev="emulator-5554"
+          adb -s $dev wait-for-device
+          ok_pkg=0; ok_act=0
+          for i in $(seq 1 180); do
+            adb -s $dev shell 'cmd package list packages >/dev/null 2>&1' && ok_pkg=1 || ok_pkg=0
+            adb -s $dev shell 'cmd activity top >/dev/null 2>&1' && ok_act=1 || ok_act=0
+            if [ $ok_pkg -eq 1 ] && [ $ok_act -eq 1 ]; then break; fi
+            sleep 2
+          done
+          [ $ok_pkg -eq 1 ] && [ $ok_act -eq 1 ] || { echo "Android framework (package/activity) no listo a tiempo"; exit 1; }
 
       # Watchdog anti-ANR del System UI
       - name: "Watchdog: cerrar ANR de System UI si aparece"
@@ -226,17 +255,10 @@ jobs:
           set -eux
           npm i -g appium
           appium driver install uiautomator2
-          # Appium v3: hay que especificar driver:feature (NO "adb_shell" a secas)
-          nohup appium --allow-insecure="uiautomator2:adb_shell" --address $APPIUM_HOST --port $APPIUM_PORT > appium.log 2>&1 &
-
-          # Esperar a que levante
+          nohup appium --allow-insecure=adb_shell --address $APPIUM_HOST --port $APPIUM_PORT > appium.log 2>&1 &
           for i in $(seq 1 60); do nc -z $APPIUM_HOST $APPIUM_PORT && break || true; sleep 1; done
           nc -z $APPIUM_HOST $APPIUM_PORT
-
-          # Salud
           curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 || (echo "Appium no responde en /status" && exit 1)
-
-
 
       - name: Ejecutar tests (Behave) con timeout propio
         timeout-minutes: 55

@@ -33,6 +33,8 @@ def create_driver(config: dict):
     options.set_capability("appium:autoGrantPermissions", True)
     options.set_capability("appium:disableWindowAnimation", True)
     options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
+    # Evita instalar io.appium.settings / cambios de settings si no es necesario
+    options.set_capability("appium:skipDeviceInitialization", True)
 
     # Timeouts amplios para CI
     options.set_capability("appium:adbExecTimeout", int(os.getenv("ADB_EXEC_TIMEOUT", "300000")))
@@ -64,7 +66,7 @@ def create_driver(config: dict):
     act_env = os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY"))
 
     if app_path:
-        # --- Normalizar path Windows->Linux (cuando corre en GitHub Actions) ---
+        # Normalizar path Windows->Linux en CI
         if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
             win_basename = os.path.basename(app_path.replace("\\", "/"))
             candidate = os.path.abspath(win_basename)
@@ -78,7 +80,6 @@ def create_driver(config: dict):
                     if os.path.exists(candidate2):
                         print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
                         app_path = candidate2
-        # ----------------------------------------------------------------------
 
         if not os.path.isabs(app_path):
             app_path = os.path.abspath(app_path)
@@ -97,7 +98,6 @@ def create_driver(config: dict):
         if act_env:
             options.set_capability("appium:appActivity", act_env)
 
-    # (Opcional) Port dedicado si querés paralelismo futuro
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 

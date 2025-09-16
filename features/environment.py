@@ -11,11 +11,8 @@ from pages.carpeta_page import CarpetaPage
 from pages.registro_page import RegistroPage
 from pages.historia_clinica_page import Historia_clinica
 
-from selenium.common.exceptions import NoSuchElementException
 from appium.webdriver.common.appiumby import AppiumBy
-
 from utils.mailtm_client import MailTmClient
-from behave.model_core import Status
 
 
 def _set_implicit_wait(driver, seconds: float):
@@ -57,23 +54,15 @@ def esperar_inicio_app(driver, timeout=25):
         print("[WARN] No se encontró ancla de inicio dentro del timeout. Continuamos de todas formas.")
 
 def _reset_app_state(driver, pkg: str, activity: str):
-    """
-    Limpia datos de la app sin reinstalar y la relanza en foreground.
-    Requiere que el workflow exporte: NO_RESET=true y ENFORCE_APP_INSTALL=false
-    """
-    # borra datos
+    """ Limpia datos sin reinstalar y relanza en foreground. """
     try:
         driver.execute_script("mobile: shell", {"command": "pm", "args": ["clear", pkg]})
     except Exception as e:
         print(f"[WARN] pm clear {pkg}: {e}")
-
-    # terminar si quedó viva
     try:
         driver.terminate_app(pkg)
     except Exception:
         pass
-
-    # relanzar
     try:
         driver.start_activity(pkg, activity)
     except Exception:
@@ -81,7 +70,6 @@ def _reset_app_state(driver, pkg: str, activity: str):
             driver.activate_app(pkg)
         except Exception as e:
             print(f"[WARN] start/activate {pkg}: {e}")
-
     esperar_inicio_app(driver)
 
 
@@ -90,14 +78,13 @@ def before_all(context):
     try:
         env = os.getenv("TEST_ENV", "staging")
         context.configs = load_config(env)
-        context.api_base_url = context.configs.get("API_BASE_URL")
         print(f"[INFO] Entorno de pruebas: {env}")
 
-        # Crear UNA sola sesión para toda la suite
+        # Una sola sesión para toda la suite
         context.driver = create_driver(context.configs)
         _set_implicit_wait(context.driver, 1.0)
 
-        # Correos / datos de entorno
+        # Mails / datos
         context.mock_sms_base_url = str(context.configs.get("MOCK_SMS_BASE_URL", os.getenv("MOCK_SMS_BASE_URL", "http://127.0.0.1:8081")))
         context.phone_old = str(context.configs.get("STAGING_PHONE_OLD", os.getenv("STAGING_PHONE_OLD", "+5491100000001")))
         context.phone_new = str(context.configs.get("STAGING_PHONE_NEW", os.getenv("STAGING_PHONE_NEW", "+5491100000002")))
@@ -120,13 +107,12 @@ def before_scenario(context, scenario):
         app_activity = context.configs.get("APP_ACTIVITY", "*")
 
         if not _has_active_session(getattr(context, "driver", None)):
-            # fallback por si se cerró por fuera
             context.driver = create_driver(context.configs)
 
         # Limpieza ligera entre escenarios (sin reinstalar)
         _reset_app_state(context.driver, app_package, app_activity)
 
-        # clientes/páginas por escenario
+        # páginas/clientes por escenario
         context.mail_client = MailTmClient(timeout=context.mail_tm_timeout)
         context.login_page = LoginPage(context.driver)
         context.registro_page = RegistroPage(context.driver, context.mail_client)
@@ -141,8 +127,8 @@ def before_scenario(context, scenario):
 
 
 def after_scenario(context, scenario):
-    print(f"=== [TEARDOWN ESCENARIO] {scenario.name} (Status.{scenario.status}) ===")
-    # mantenemos la sesión viva para el siguiente escenario (más estable en CI)
+    print(f"=== [TEARDOWN ESCENARIO] {scenario.name} ({scenario.status}) ===")
+    # Mantener la sesión viva es más estable en CI
     pass
 
 
