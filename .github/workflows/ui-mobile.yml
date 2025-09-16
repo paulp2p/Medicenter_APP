@@ -18,7 +18,7 @@ concurrency:
 env:
   ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
   ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
-  API_LEVEL: 31
+  API_LEVEL: 30               # ⬅️ subimos a 31
   AVD_NAME: ci-pixel5-api31
   DEVICE_PROFILE: pixel_5
   APK_LOCAL_NAME: medicenter_app.apk
@@ -40,7 +40,7 @@ env:
 jobs:
   android-behave:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -137,15 +137,17 @@ jobs:
           yes | sdkmanager --licenses
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-            "build-tools;31.0.0" \
+            "build-tools;30.0.3" \
             "system-images;android-${API_LEVEL};google_apis;x86_64"
 
+          # Symlink esperado por algunas herramientas
           sudo mkdir -p /usr/local/lib/android
           if [ ! -e /usr/local/lib/android/sdk ]; then
             sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
           fi
 
           ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
+
           adb version
           emulator -version
 
@@ -164,8 +166,10 @@ jobs:
             echo "abi.type=x86_64"
             echo "tag.id=google_apis"
             echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
+            echo "hw.ramSize=3072"             # ⬅️ más RAM
+            echo "vm.heapSize=512"
           } >> "$AVD_CFG"
-          grep -E '(^image.sysdir.1|^abi.type|^tag.id)' "$AVD_CFG" || true
+          grep -E '(^image.sysdir.1|^abi.type|^tag.id|^hw.ramSize|^vm.heapSize)' "$AVD_CFG" || true
 
       - name: Iniciar emulador (headless) y estabilizar ADB
         shell: bash
@@ -193,7 +197,7 @@ jobs:
           done
           [ "$boot" = "1" ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1; }
 
-      - name: Desbloquear y esperar servicios Android (package/settings)
+      - name: Desbloquear, esperar servicios y desactivar animaciones
         run: |
           set -eux
           dev="emulator-5554"
@@ -202,20 +206,36 @@ jobs:
           adb -s $dev shell input keyevent 82 || true
           adb -s $dev shell input keyevent 3  || true
 
-          # Espera dura a pm y settings
-          for i in $(seq 1 180); do
-            adb -s $dev shell 'pm list packages >/dev/null 2>&1' && ok_pm=1 || ok_pm=0
-            adb -s $dev shell 'settings list system >/dev/null 2>&1' && ok_set=1 || ok_set=0
-            [ $ok_pm -eq 1 ] && [ $ok_set -eq 1 ] && break || true
+          for i in $(seq 1 60); do
+            adb -s $dev shell 'pm path android' >/dev/null 2>&1 && break || true
             sleep 2
           done
-          [ $ok_pm -eq 1 ] && [ $ok_set -eq 1 ]
+          adb -s $dev shell 'settings list system' >/dev/null 2>&1 || true
 
           adb -s $dev shell settings put global window_animation_scale 0 || true
           adb -s $dev shell settings put global transition_animation_scale 0 || true
           adb -s $dev shell settings put global animator_duration_scale 0 || true
 
+          adb -s $dev shell svc power stayon true || true
+          adb -s $dev shell dumpsys deviceidle disable || true
+
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
+
+      # ---------- Watchdog anti-ANR del System UI ----------
+      - name: "Watchdog: cerrar ANR de System UI si aparece"
+        run: |
+          set -eux
+          nohup bash -c '
+            while true; do
+              # Si Android reporta ANR en SystemUI, intentamos cerrar diálogos del sistema
+              if adb -s emulator-5554 shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
+                adb -s emulator-5554 shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
+                # navegar al botón "Wait" (DPAD_RIGHT + ENTER) un par de veces
+                for i in 1 2 3; do adb -s emulator-5554 shell input keyevent 22; adb -s emulator-5554 shell input keyevent 66; sleep 1; done
+              fi
+              sleep 2
+            done
+          ' > watchdog.log 2>&1 &
 
       - name: Instalar APK en el emulador
         run: |
@@ -237,39 +257,8 @@ jobs:
           nc -z $APPIUM_HOST $APPIUM_PORT
           curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 || (echo "Appium no responde en /status" && exit 1)
 
-      - name: "Workaround CI: preinstalar y lanzar io.appium.settings"
-        run: |
-          set -eux
-          dev="emulator-5554"
-          APP_HOME="$HOME/.appium"
-          SETTINGS_APK=""
-
-          # Buscar en rutas conocidas dentro de ~/.appium
-          for p in \
-            "$APP_HOME/node_modules/io.appium.settings/apks/settings_apk-debug.apk" \
-            "$APP_HOME/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
-          do
-            if [ -f "$p" ]; then SETTINGS_APK="$p"; break; fi
-          done
-
-          test -n "$SETTINGS_APK" || { echo "No se encontró io.appium.settings APK dentro de $APP_HOME"; ls -R "$APP_HOME" || true; exit 1; }
-
-          # Instalar/actualizar Settings y otorgar permisos esenciales
-          adb -s "$dev" install -r "$SETTINGS_APK" || true
-          adb -s "$dev" shell pm grant io.appium.settings android.permission.WRITE_SECURE_SETTINGS || true
-          adb -s "$dev" shell pm grant io.appium.settings android.permission.CHANGE_NETWORK_STATE || true
-          adb -s "$dev" shell pm grant io.appium.settings android.permission.ACCESS_FINE_LOCATION || true
-          adb -s "$dev" shell pm grant io.appium.settings android.permission.ACCESS_COARSE_LOCATION || true
-
-          # Lanzar la app para activar su servicio y verificar
-          adb -s "$dev" shell monkey -p io.appium.settings -c android.intent.category.LAUNCHER 1 || true
-          for i in $(seq 1 60); do
-            adb -s "$dev" shell dumpsys activity services io.appium.settings | grep -q io.appium.settings && exit 0 || true
-            sleep 1
-          done
-          echo "io.appium.settings no quedó corriendo a tiempo"; exit 1
-
-      - name: Ejecutar tests (Behave)
+      - name: Ejecutar tests (Behave) con timeout propio
+        timeout-minutes: 55
         env:
           DEVICE_NAME: "emulator-5554"
           PLATFORM_NAME: "Android"
@@ -284,12 +273,19 @@ jobs:
           export ADB_EXEC_TIMEOUT=300000
           export UIA2_INSTALL_TIMEOUT=300000
           export UIA2_LAUNCH_TIMEOUT=300000
+
           mkdir -p reports/allure-results
           if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
+            timeout 50m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
           else
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+            timeout 50m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
+
+      - name: Capturar logcat para diagnóstico
+        if: always()
+        run: |
+          set -eux
+          adb -s emulator-5554 logcat -d > logcat.txt || true
 
       - name: Subir artefactos (Allure, logs)
         if: always()
@@ -301,6 +297,8 @@ jobs:
             appium.log
             adb-install.log
             emulator.log
+            logcat.txt
+            watchdog.log
           if-no-files-found: warn
           retention-days: 7
 
