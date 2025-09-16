@@ -231,30 +231,6 @@ jobs:
           nc -z $APPIUM_HOST $APPIUM_PORT
           curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 || (echo "Appium no responde en /status" && exit 1)
 
-      - name: "Preinstalar y lanzar io.appium.settings (ruta fija)"
-        run: |
-          set -eux
-          dev="emulator-5554"
-
-          # APK que instala Appium al correr: `appium driver install uiautomator2`
-          SETTINGS_APK="$HOME/.appium/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
-
-          # Verifica que exista el APK en la ruta esperada
-          test -f "$SETTINGS_APK" || { echo "No se encontró io.appium.settings en: $SETTINGS_APK"; ls -R "$HOME/.appium" || true; exit 1; }
-
-          # Asegura que PackageManager/Settings ya responden antes de instalar
-          for i in $(seq 1 60); do
-            adb -s $dev shell 'pm path android' >/dev/null 2>&1 && break || true
-            sleep 2
-          done
-          adb -s $dev shell 'settings list system' >/dev/null 2>&1 || true
-
-          # Instala/actualiza y lanza Settings
-          adb -s "$dev" install -r "$SETTINGS_APK" || true
-          adb -s "$dev" shell am start -n io.appium.settings/.Settings -W || true
-
-          # Comprobación suave (no falla el job si no hay PID)
-          adb -s "$dev" shell pidof io.appium.settings >/dev/null 2>&1 || echo "WARN: io.appium.settings sin PID; Appium intentará lanzarla al iniciar sesión."
 
       - name: Ejecutar tests (Behave) con timeout propio
         timeout-minutes: 55
