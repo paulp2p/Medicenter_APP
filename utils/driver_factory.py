@@ -33,8 +33,6 @@ def create_driver(config: dict):
     options.set_capability("appium:autoGrantPermissions", True)
     options.set_capability("appium:disableWindowAnimation", True)
     options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
-    # No forzamos skipDeviceInitialization en runners lentos
-    # options.set_capability("appium:skipDeviceInitialization", False)
 
     # Timeouts amplios para CI
     options.set_capability("appium:adbExecTimeout", int(os.getenv("ADB_EXEC_TIMEOUT", "300000")))
@@ -43,10 +41,10 @@ def create_driver(config: dict):
     options.set_capability("appium:androidInstallTimeout", int(os.getenv("ANDROID_INSTALL_TIMEOUT", "300000")))
     options.set_capability("appium:appWaitActivity", config.get("APP_WAIT_ACTIVITY", "*"))
 
-    # Reinstalación/estado de app entre runs
-    options.set_capability("appium:noReset", _bool(config.get("NO_RESET", os.getenv("NO_RESET", "false"))))
+    # Reinstalación/estado entre runs (por defecto NO reinstalar)
+    options.set_capability("appium:noReset", _bool(config.get("NO_RESET", os.getenv("NO_RESET", "true"))))
     options.set_capability("appium:fullReset", _bool(config.get("FULL_RESET", os.getenv("FULL_RESET", "false"))))
-    options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "true"), True))
+    options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "false"), False))
 
     # Idioma/locale
     options.set_capability("appium:language", os.getenv("LANGUAGE", config.get("LANGUAGE", "en")))

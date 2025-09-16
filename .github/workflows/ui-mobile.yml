@@ -18,8 +18,8 @@ concurrency:
 env:
   ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
   ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
-  API_LEVEL: 30               # ⬅️ subimos a 31
-  AVD_NAME: ci-pixel5-api31
+  API_LEVEL: 30
+  AVD_NAME: ci-pixel5-api30
   DEVICE_PROFILE: pixel_5
   APK_LOCAL_NAME: medicenter_app.apk
   PY_VERSION: "3.11"
@@ -138,7 +138,7 @@ jobs:
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
             "build-tools;30.0.3" \
-            "system-images;android-${API_LEVEL};google_apis;x86_64"
+            "system-images;android-${API_LEVEL};default;x86_64"
 
           # Symlink esperado por algunas herramientas
           sudo mkdir -p /usr/local/lib/android
@@ -146,7 +146,7 @@ jobs:
             sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
           fi
 
-          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
+          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64" || exit 1
 
           adb version
           emulator -version
@@ -157,16 +157,16 @@ jobs:
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           mkdir -p "$ANDROID_AVD_HOME"
           yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
+            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};default;x86_64" \
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
             echo "hw.cpu.ncore=2"
             echo "disk.dataPartition.size=2048M"
             echo "abi.type=x86_64"
-            echo "tag.id=google_apis"
-            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
-            echo "hw.ramSize=3072"             # ⬅️ más RAM
+            echo "tag.id=default"
+            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64"
+            echo "hw.ramSize=3072"
             echo "vm.heapSize=512"
           } >> "$AVD_CFG"
           grep -E '(^image.sysdir.1|^abi.type|^tag.id|^hw.ramSize|^vm.heapSize)' "$AVD_CFG" || true
@@ -197,40 +197,14 @@ jobs:
           done
           [ "$boot" = "1" ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1; }
 
-      - name: Desbloquear, esperar servicios y desactivar animaciones
-        run: |
-          set -eux
-          dev="emulator-5554"
-          adb -s $dev shell input keyevent 224 || true
-          adb -s $dev shell wm dismiss-keyguard || true
-          adb -s $dev shell input keyevent 82 || true
-          adb -s $dev shell input keyevent 3  || true
-
-          for i in $(seq 1 60); do
-            adb -s $dev shell 'pm path android' >/dev/null 2>&1 && break || true
-            sleep 2
-          done
-          adb -s $dev shell 'settings list system' >/dev/null 2>&1 || true
-
-          adb -s $dev shell settings put global window_animation_scale 0 || true
-          adb -s $dev shell settings put global transition_animation_scale 0 || true
-          adb -s $dev shell settings put global animator_duration_scale 0 || true
-
-          adb -s $dev shell svc power stayon true || true
-          adb -s $dev shell dumpsys deviceidle disable || true
-
-          echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
-
-      # ---------- Watchdog anti-ANR del System UI ----------
+      # Watchdog anti-ANR del System UI
       - name: "Watchdog: cerrar ANR de System UI si aparece"
         run: |
           set -eux
           nohup bash -c '
             while true; do
-              # Si Android reporta ANR en SystemUI, intentamos cerrar diálogos del sistema
               if adb -s emulator-5554 shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
                 adb -s emulator-5554 shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
-                # navegar al botón "Wait" (DPAD_RIGHT + ENTER) un par de veces
                 for i in 1 2 3; do adb -s emulator-5554 shell input keyevent 22; adb -s emulator-5554 shell input keyevent 66; sleep 1; done
               fi
               sleep 2
@@ -269,7 +243,9 @@ jobs:
         run: |
           set -eux
           export APP="${APK_LOCAL_NAME}"
-          export ANDROID_INSTALL_TIMEOUT=300000
+          export ANDROID_INSTALL_TIMEOUT=600000
+          export NO_RESET=true
+          export ENFORCE_APP_INSTALL=false
           export ADB_EXEC_TIMEOUT=300000
           export UIA2_INSTALL_TIMEOUT=300000
           export UIA2_LAUNCH_TIMEOUT=300000
