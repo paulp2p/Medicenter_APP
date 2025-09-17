@@ -92,10 +92,8 @@ jobs:
           fi
           mkdir -p "${HOME}/.config/rclone"
           CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
-          # Padding para evitar 'Short input' en macOS
           PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
-          # macOS usa -D para decodificar
           printf '%s' "$CLEAN" | base64 -D > "${HOME}/.config/rclone/rclone.conf"
           rclone version
           rclone listremotes
@@ -164,34 +162,56 @@ jobs:
           set -eux
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
+          # Info opcional
+          emulator -accel-check || true
+          emulator -list-avds || true
+
+          # 1) Lanzar en background
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
-            -gpu host -noaudio -camera-back none -camera-front none \
+            -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
             > emulator.log 2>&1 &
 
-          adb wait-for-device
+          # 2) ADB server
+          adb start-server
 
-          # Esperar boot (sin 'timeout' GNU)
+          # 3) Detectar serial real (emulator-XXXX)
+          DEV=""
+          for i in {1..60}; do
+            DEV="$(adb devices | awk '/emulator-/{print $1; exit}')"
+            [ -n "$DEV" ] && break || true
+            sleep 2
+          done
+          if [ -z "$DEV" ]; then
+            echo "No se detectó ningún emulator-* en 120s"; tail -n +1 emulator.log || true; exit 1
+          fi
+          echo "DEV detectado: $DEV"
+          echo "ANDROID_SERIAL=$DEV" >> "$GITHUB_ENV"
+
+          # 4) Esperar boot del framework (máx ~5 min)
           BOOT_OK=0
           for i in {1..300}; do
-            if adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then BOOT_OK=1; break; fi
+            if adb -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then BOOT_OK=1; break; fi
             sleep 1
           done
           if [ "$BOOT_OK" -ne 1 ]; then
             echo "El emulador no booteó a tiempo"; tail -n +1 emulator.log || true; exit 1
           fi
 
-          # Desbloquear y desactivar animaciones
-          adb shell input keyevent 224 || true
-          adb shell wm dismiss-keyguard || true
-          adb shell input keyevent 82 || true
-          adb shell input keyevent 3  || true
-          adb shell settings put global window_animation_scale 0 || true
-          adb shell settings put global transition_animation_scale 0 || true
-          adb shell settings put global animator_duration_scale 0 || true
-          adb shell svc power stayon true || true
-
-          echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV" || true
+      - name: Desbloquear y desactivar animaciones
+        shell: bash
+        run: |
+          set -eux
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
+          adb -s "$dev" shell input keyevent 224 || true
+          adb -s "$dev" shell wm dismiss-keyguard || true
+          adb -s "$dev" shell input keyevent 82 || true
+          adb -s "$dev" shell input keyevent 3  || true
+          adb -s "$dev" shell settings put global window_animation_scale 0 || true
+          adb -s "$dev" shell settings put global transition_animation_scale 0 || true
+          adb -s "$dev" shell settings put global animator_duration_scale 0 || true
+          adb -s "$dev" shell svc power stayon true || true
 
       - name: Instalar y arrancar Appium
         if: env.USE_APPIUM == 'true'
@@ -202,8 +222,7 @@ jobs:
           appium --version
           appium driver install uiautomator2
           nohup appium --allow-insecure=adb_shell --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
-
-          # Espera /status (hasta 90s)
+          # Health-check /status (hasta 90s)
           READY=0
           for i in {1..90}; do
             if curl -sf "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null; then READY=1; break; fi
@@ -214,19 +233,22 @@ jobs:
           fi
 
       - name: Instalar APK en el emulador
+        shell: bash
         run: |
           set -eux
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
           adb devices
           if [ -n "${APP_PACKAGE:-}" ]; then
-            adb uninstall "${APP_PACKAGE}" || true
+            adb -s "$dev" uninstall "${APP_PACKAGE}" || true
           fi
-          adb install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+          adb -s "$dev" install -r "${APK_LOCAL_NAME}" | tee adb-install.log
 
       - name: Ejecutar tests (Behave) con timeout propio
         if: env.USE_APPIUM == 'true'
         timeout-minutes: 55
         env:
-          DEVICE_NAME: "emulator-5554"
+          DEVICE_NAME: "${{ env.ANDROID_SERIAL }}"
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
           APPIUM_SERVER_URL: "http://${{ env.APPIUM_HOST }}:${{ env.APPIUM_PORT }}"
@@ -241,7 +263,6 @@ jobs:
           export ADB_EXEC_TIMEOUT=300000
           export UIA2_INSTALL_TIMEOUT=300000
           export UIA2_LAUNCH_TIMEOUT=300000
-
           mkdir -p reports/allure-results
           if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
@@ -251,9 +272,12 @@ jobs:
 
       - name: Capturar logcat para diagnóstico
         if: always()
+        shell: bash
         run: |
           set -eux
-          adb logcat -d > logcat.txt || true
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          [ -z "$dev" ] && dev="emulator-5554"
+          adb -s "$dev" logcat -d > logcat.txt || true
 
       - name: Subir artefactos (Allure, logs)
         if: always()
@@ -271,8 +295,10 @@ jobs:
 
       - name: Apagar emulador y limpiar
         if: always()
+        shell: bash
         run: |
           set -eux
-          adb emu kill || true
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          if [ -n "$dev" ]; then adb -s "$dev" emu kill || true; fi
           pkill -f "emulator" || true
           pkill -f "appium" || true
