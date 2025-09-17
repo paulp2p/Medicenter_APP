@@ -56,7 +56,7 @@ jobs:
         if: env.USE_APPIUM == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "20"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,7 +79,7 @@ jobs:
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y rclone netcat-openbsd curl
+          sudo apt-get install -y rclone curl netcat-openbsd
 
       - name: "Configurar rclone (desde secreto base64 robusto)"
         env:
@@ -203,6 +203,8 @@ jobs:
           set -eux
           dev="emulator-5554"
           adb -s $dev shell input keyevent 224 || true
+          adb -s $dev shell wm dismiss-keyguard || true
+          adb -s $dev shell input keyevent 82 || true
           adb -s $dev shell input keyevent 3  || true
           adb -s $dev shell settings put global window_animation_scale 0 || true
           adb -s $dev shell settings put global transition_animation_scale 0 || true
@@ -210,7 +212,7 @@ jobs:
           adb -s $dev shell svc power stayon true || true
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
-      # ✅ ESPERA ROBUSTA (no bloqueante): pm/settings listos
+      # ✅ ESPERA CORTA (no bloqueante): pm/settings listos
       - name: Espera corta (no bloqueante) de framework
         run: |
           set -eux
@@ -238,6 +240,27 @@ jobs:
             done
           ' > watchdog.log 2>&1 &
 
+      # 👉 NUEVO: Instalar y arrancar Appium (espera /status)
+      - name: Instalar y arrancar Appium
+        if: env.USE_APPIUM == 'true'
+        run: |
+          set -euxo pipefail
+          echo "$(npm -g bin)" >> "$GITHUB_PATH" || true
+          npm i -g appium
+          appium --version
+          appium driver install uiautomator2
+          nohup appium --allow-insecure=adb_shell --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
+          # Espera a que /status responda (hasta 90s)
+          for i in $(seq 1 90); do
+            if curl -sf "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null; then
+              echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"; break
+            fi
+            sleep 1
+          done
+          # Comprobación final con log si falla
+          curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
+            || { echo "Appium no responde en /status"; tail -n +500 appium.log || true; exit 1; }
+
       - name: Instalar APK en el emulador
         run: |
           set -eux
@@ -247,8 +270,8 @@ jobs:
           fi
           adb -s emulator-5554 install -r "${APK_LOCAL_NAME}" | tee adb-install.log
 
-
       - name: Ejecutar tests (Behave) con timeout propio
+        if: env.USE_APPIUM == 'true'
         timeout-minutes: 55
         env:
           DEVICE_NAME: "emulator-5554"
