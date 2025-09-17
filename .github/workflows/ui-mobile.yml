@@ -1,4 +1,4 @@
-name: Android Behave Tests (macOS + HVF, APK desde Drive)
+name: Android Behave Tests (APK desde Drive, Ubuntu TCG)
 
 on:
   workflow_dispatch:
@@ -39,7 +39,7 @@ env:
 
 jobs:
   android-behave:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 90
 
     steps:
@@ -75,26 +75,24 @@ jobs:
           fi
 
       # ---------- RCLONE ----------
-      - name: Instalar rclone
+      - name: Instalar rclone y utilidades
         run: |
           set -eux
-          brew update
-          brew install rclone
+          sudo apt-get update
+          sudo apt-get install -y rclone curl netcat-openbsd
 
-      - name: Configurar rclone (desde secreto base64, sin Python)
+      - name: Configurar rclone (desde secreto base64)
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${RCLONE_CONF_B64:-}" ]; then
-            echo "Falta secrets.RCLONE_CONF_B64"; exit 1
-          fi
+          [ -n "${RCLONE_CONF_B64:-}" ] || { echo "Falta secrets.RCLONE_CONF_B64"; exit 1; }
           mkdir -p "${HOME}/.config/rclone"
           CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
           PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
-          printf '%s' "$CLEAN" | base64 -D > "${HOME}/.config/rclone/rclone.conf"
+          printf '%s' "$CLEAN" | base64 -d > "${HOME}/.config/rclone/rclone.conf"
           rclone version
           rclone listremotes
 
@@ -105,13 +103,25 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
+      # ---------- Dependencias del emulador ----------
+      - name: Instalar dependencias del emulador (libs)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpulse0 libasound2t64 libnss3 \
+            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
+            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
+            libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
+            libfontconfig1 ca-certificates
+
       # ---------- ANDROID SDK + EMULADOR ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
         run: |
           set -eux
           mkdir -p "$ANDROID_SDK_ROOT"
           cd "$ANDROID_SDK_ROOT"
-          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip
+          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           mkdir -p cmdline-tools
           unzip -q cmdline-tools.zip -d cmdline-tools
           mv cmdline-tools/cmdline-tools cmdline-tools/latest
@@ -124,16 +134,11 @@ jobs:
 
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-          # Detectar ABI según arquitectura del runner
-          ARCH="$(uname -m)"; ABI="x86_64"
-          if [ "$ARCH" = "arm64" ]; then ABI="arm64-v8a"; fi
-          echo "ABI=$ABI" >> "$GITHUB_ENV"
-
           yes | sdkmanager --licenses
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
             "build-tools;30.0.3" \
-            "system-images;android-${API_LEVEL};google_apis;${ABI}"
+            "system-images;android-${API_LEVEL};google_apis;x86_64"
 
           adb version
           emulator -version
@@ -144,59 +149,57 @@ jobs:
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           mkdir -p "$ANDROID_AVD_HOME"
           yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;${ABI}" \
+            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
-            echo "hw.cpu.ncore=4"
-            echo "hw.ramSize=4096"
-            echo "vm.heapSize=576"
+            echo "hw.cpu.ncore=3"
+            echo "hw.ramSize=3072"
+            echo "vm.heapSize=512"
             echo "tag.id=google_apis"
-            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/${ABI}"
-            echo "disk.dataPartition.size=4096M"
+            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
+            echo "disk.dataPartition.size=2048M"
           } >> "$AVD_CFG"
 
-
-      - name: Iniciar emulador (headless, sin HVF) y esperar boot
+      - name: Iniciar emulador (headless, TCG software) y esperar boot
         shell: bash
         run: |
           set -eux
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          export ANDROID_EMULATOR_USE_SYSTEM_LIBS=1
 
-          # Info opcional
-          emulator -list-avds || true
-
-          # Lanzar SIN aceleración (HVF off) y sin métricas
+          # 1) Lanzar en background (sin aceleración ni métricas)
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
             -accel off -no-metrics \
             -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
             > emulator.log 2>&1 &
 
-          # ADB server y detección de serial real
+          # 2) ADB server
           adb start-server
+
+          # 3) Detectar serial real (emulator-XXXX)
           DEV=""
-          for i in {1..90}; do
+          for i in {1..120}; do
             DEV="$(adb devices | awk '/emulator-/{print $1; exit}')"
             [ -n "$DEV" ] && break || true
             sleep 2
           done
           if [ -z "$DEV" ]; then
-            echo "No se detectó ningún emulator-* a tiempo"; tail -n +1 emulator.log || true; exit 1
+            echo "No se detectó ningún emulator-* a tiempo"; tail -n +200 emulator.log || true; exit 1
           fi
           echo "DEV detectado: $DEV"
           echo "ANDROID_SERIAL=$DEV" >> "$GITHUB_ENV"
 
-          # Esperar boot del framework (máx ~7 min en software)
+          # 4) Esperar boot del framework (más lento en software ~6-8 min)
           BOOT_OK=0
-          for i in {1..420}; do
+          for i in {1..600}; do
             if adb -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then BOOT_OK=1; break; fi
             sleep 1
           done
           if [ "$BOOT_OK" -ne 1 ]; then
             echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log || true; exit 1
           fi
-
 
       - name: Desbloquear y desactivar animaciones
         shell: bash
@@ -244,7 +247,7 @@ jobs:
           fi
           adb -s "$dev" install -r "${APK_LOCAL_NAME}" | tee adb-install.log
 
-      - name: Ejecutar tests (Behave) con timeout propio
+      - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'
         timeout-minutes: 55
         env:
@@ -302,3 +305,4 @@ jobs:
           if [ -n "$dev" ]; then adb -s "$dev" emu kill || true; fi
           pkill -f "emulator" || true
           pkill -f "appium" || true
+          adb kill-server || true
