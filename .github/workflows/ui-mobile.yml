@@ -1,4 +1,4 @@
-name: Android Behave Tests (APK desde Drive, emulador manual)
+name: Android Behave Tests (macOS + HVF, APK desde Drive)
 
 on:
   workflow_dispatch:
@@ -39,7 +39,7 @@ env:
 
 jobs:
   android-behave:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 90
 
     steps:
@@ -78,21 +78,25 @@ jobs:
       - name: Instalar rclone
         run: |
           set -eux
-          sudo apt-get update
-          sudo apt-get install -y rclone curl netcat-openbsd
+          brew update
+          brew install rclone
 
-      - name: "Configurar rclone (desde secreto base64 robusto)"
+      - name: Configurar rclone (desde secreto base64, sin Python)
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${RCLONE_CONF_B64:-}" ] || { echo "Falta secrets.RCLONE_CONF_B64"; exit 1; }
-          mkdir -p ~/.config/rclone
+          if [ -z "${RCLONE_CONF_B64:-}" ]; then
+            echo "Falta secrets.RCLONE_CONF_B64"; exit 1
+          fi
+          mkdir -p "${HOME}/.config/rclone"
           CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
+          # Padding para evitar 'Short input' en macOS
           PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
-          printf '%s' "$CLEAN" | base64 -d > ~/.config/rclone/rclone.conf
+          # macOS usa -D para decodificar
+          printf '%s' "$CLEAN" | base64 -D > "${HOME}/.config/rclone/rclone.conf"
           rclone version
           rclone listremotes
 
@@ -103,25 +107,13 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
-      # ---------- Dependencias del emulador ----------
-      - name: Instalar dependencias del emulador (libs)
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y \
-            libpulse0 libasound2t64 libnss3 \
-            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
-            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
-            libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
-            libfontconfig1 ca-certificates
-
       # ---------- ANDROID SDK + EMULADOR ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
         run: |
           set -eux
           mkdir -p "$ANDROID_SDK_ROOT"
           cd "$ANDROID_SDK_ROOT"
-          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip
           mkdir -p cmdline-tools
           unzip -q cmdline-tools.zip -d cmdline-tools
           mv cmdline-tools/cmdline-tools cmdline-tools/latest
@@ -134,19 +126,16 @@ jobs:
 
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
+          # Detectar ABI según arquitectura del runner
+          ARCH="$(uname -m)"; ABI="x86_64"
+          if [ "$ARCH" = "arm64" ]; then ABI="arm64-v8a"; fi
+          echo "ABI=$ABI" >> "$GITHUB_ENV"
+
           yes | sdkmanager --licenses
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
             "build-tools;30.0.3" \
-            "system-images;android-${API_LEVEL};google_apis;x86_64"
-
-          # Symlink esperado por algunas herramientas
-          sudo mkdir -p /usr/local/lib/android
-          if [ ! -e /usr/local/lib/android/sdk ]; then
-            sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
-          fi
-
-          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
+            "system-images;android-${API_LEVEL};google_apis;${ABI}"
 
           adb version
           emulator -version
@@ -157,90 +146,53 @@ jobs:
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           mkdir -p "$ANDROID_AVD_HOME"
           yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
+            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;${ABI}" \
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
-            echo "hw.cpu.ncore=2"
-            echo "disk.dataPartition.size=2048M"
-            echo "abi.type=x86_64"
+            echo "hw.cpu.ncore=3"
+            echo "hw.ramSize=4096"
+            echo "vm.heapSize=576"
             echo "tag.id=google_apis"
-            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
-            echo "hw.ramSize=3072"
-            echo "vm.heapSize=512"
+            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/${ABI}"
+            echo "disk.dataPartition.size=4096M"
           } >> "$AVD_CFG"
-          grep -E '(^image.sysdir.1|^abi.type|^tag.id|^hw.ramSize|^vm.heapSize)' "$AVD_CFG" || true
 
-      - name: Iniciar emulador (headless) y estabilizar ADB
+      - name: Iniciar emulador (HVF headless) y esperar boot
         shell: bash
         run: |
           set -eux
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          export ANDROID_EMULATOR_USE_SYSTEM_LIBS=1
-          export ADB_VENDOR_KEYS=
-
-          pkill -f "adb" || true
-          adb kill-server || true
-          adb start-server
 
           nohup emulator -avd "$AVD_NAME" \
-            -no-window -no-boot-anim -no-snapshot -accel off \
-            -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
-            -no-metrics -port 5554 -ports 5554,5555 > emulator.log 2>&1 &
+            -no-window -no-boot-anim -no-snapshot \
+            -gpu host -noaudio -camera-back none -camera-front none \
+            > emulator.log 2>&1 &
 
-          timeout 180s bash -c 'until adb -s emulator-5554 get-state 2>/dev/null; do sleep 2; done'
+          adb wait-for-device
 
-          # boot flag
-          for i in $(seq 1 120); do
-            boot="$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-            [ "$boot" = "1" ] && break || true
-            sleep 5
+          # Esperar boot (sin 'timeout' GNU)
+          BOOT_OK=0
+          for i in {1..300}; do
+            if adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then BOOT_OK=1; break; fi
+            sleep 1
           done
-          [ "$boot" = "1" ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log; exit 1; }
+          if [ "$BOOT_OK" -ne 1 ]; then
+            echo "El emulador no booteó a tiempo"; tail -n +1 emulator.log || true; exit 1
+          fi
 
-      - name: Desbloquear y desactivar animaciones
-        run: |
-          set -eux
-          dev="emulator-5554"
-          adb -s $dev shell input keyevent 224 || true
-          adb -s $dev shell wm dismiss-keyguard || true
-          adb -s $dev shell input keyevent 82 || true
-          adb -s $dev shell input keyevent 3  || true
-          adb -s $dev shell settings put global window_animation_scale 0 || true
-          adb -s $dev shell settings put global transition_animation_scale 0 || true
-          adb -s $dev shell settings put global animator_duration_scale 0 || true
-          adb -s $dev shell svc power stayon true || true
-          echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
+          # Desbloquear y desactivar animaciones
+          adb shell input keyevent 224 || true
+          adb shell wm dismiss-keyguard || true
+          adb shell input keyevent 82 || true
+          adb shell input keyevent 3  || true
+          adb shell settings put global window_animation_scale 0 || true
+          adb shell settings put global transition_animation_scale 0 || true
+          adb shell settings put global animator_duration_scale 0 || true
+          adb shell svc power stayon true || true
 
-      # ✅ ESPERA CORTA (no bloqueante): pm/settings listos
-      - name: Espera corta (no bloqueante) de framework
-        run: |
-          set -eux
-          dev="emulator-5554"
-          for i in $(seq 1 30); do
-            pm_ok=0; set_ok=0
-            adb -s $dev shell 'pm path android >/dev/null 2>&1' && pm_ok=1 || pm_ok=0
-            adb -s $dev shell 'settings list system >/dev/null 2>&1' && set_ok=1 || set_ok=0
-            [ $pm_ok -eq 1 ] && [ $set_ok -eq 1 ] && break || true
-            sleep 2
-          done
-          true
+          echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV" || true
 
-      # Watchdog anti-ANR del System UI
-      - name: "Watchdog: cerrar ANR de System UI si aparece"
-        run: |
-          set -eux
-          nohup bash -c '
-            while true; do
-              if adb -s emulator-5554 shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
-                adb -s emulator-5554 shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
-                for i in 1 2 3; do adb -s emulator-5554 shell input keyevent 22; adb -s emulator-5554 shell input keyevent 66; sleep 1; done
-              fi
-              sleep 2
-            done
-          ' > watchdog.log 2>&1 &
-
-      # 👉 NUEVO: Instalar y arrancar Appium (espera /status)
       - name: Instalar y arrancar Appium
         if: env.USE_APPIUM == 'true'
         run: |
@@ -250,25 +202,25 @@ jobs:
           appium --version
           appium driver install uiautomator2
           nohup appium --allow-insecure=adb_shell --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
-          # Espera a que /status responda (hasta 90s)
-          for i in $(seq 1 90); do
-            if curl -sf "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null; then
-              echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"; break
-            fi
+
+          # Espera /status (hasta 90s)
+          READY=0
+          for i in {1..90}; do
+            if curl -sf "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null; then READY=1; break; fi
             sleep 1
           done
-          # Comprobación final con log si falla
-          curl -sSf "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
-            || { echo "Appium no responde en /status"; tail -n +500 appium.log || true; exit 1; }
+          if [ "$READY" -ne 1 ]; then
+            echo "Appium no responde en /status"; tail -n +500 appium.log || true; exit 1
+          fi
 
       - name: Instalar APK en el emulador
         run: |
           set -eux
           adb devices
           if [ -n "${APP_PACKAGE:-}" ]; then
-            adb -s emulator-5554 uninstall "${APP_PACKAGE}" || true
+            adb uninstall "${APP_PACKAGE}" || true
           fi
-          adb -s emulator-5554 install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+          adb install -r "${APK_LOCAL_NAME}" | tee adb-install.log
 
       - name: Ejecutar tests (Behave) con timeout propio
         if: env.USE_APPIUM == 'true'
@@ -292,16 +244,16 @@ jobs:
 
           mkdir -p reports/allure-results
           if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
-            timeout 50m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
+            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
           else
-            timeout 50m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
 
       - name: Capturar logcat para diagnóstico
         if: always()
         run: |
           set -eux
-          adb -s emulator-5554 logcat -d > logcat.txt || true
+          adb logcat -d > logcat.txt || true
 
       - name: Subir artefactos (Allure, logs)
         if: always()
@@ -314,7 +266,6 @@ jobs:
             adb-install.log
             emulator.log
             logcat.txt
-            watchdog.log
           if-no-files-found: warn
           retention-days: 7
 
@@ -322,7 +273,6 @@ jobs:
         if: always()
         run: |
           set -eux
-          adb -s emulator-5554 emu kill || true
+          adb emu kill || true
           pkill -f "emulator" || true
           pkill -f "appium" || true
-          adb kill-server || true
