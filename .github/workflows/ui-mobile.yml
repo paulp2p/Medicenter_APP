@@ -138,14 +138,15 @@ jobs:
           yes | sdkmanager \
             "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
             "build-tools;30.0.3" \
-            "system-images;android-${API_LEVEL};default;x86_64"
+            "system-images;android-${API_LEVEL};google_apis;x86_64"
 
+          # Symlink esperado por algunas herramientas
           sudo mkdir -p /usr/local/lib/android
           if [ ! -e /usr/local/lib/android/sdk ]; then
             sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
           fi
 
-          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64" || exit 1
+          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64" || exit 1
 
           adb version
           emulator -version
@@ -156,15 +157,15 @@ jobs:
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           mkdir -p "$ANDROID_AVD_HOME"
           yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};default;x86_64" \
+            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
             echo "hw.cpu.ncore=2"
             echo "disk.dataPartition.size=2048M"
             echo "abi.type=x86_64"
-            echo "tag.id=default"
-            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64"
+            echo "tag.id=google_apis"
+            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
             echo "hw.ramSize=3072"
             echo "vm.heapSize=512"
           } >> "$AVD_CFG"
@@ -211,12 +212,11 @@ jobs:
           adb -s $dev shell svc power stayon true || true
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
-      # ✅ ESPERA ROBUSTA: PackageManager y Activity listos antes de instalar nada
+      # ✅ ESPERA ROBUSTA (no bloqueante): pm/settings listos
       - name: Espera corta (no bloqueante) de framework
         run: |
           set -eux
           dev="emulator-5554"
-          # esperamos hasta 60s como máximo a que pm y settings respondan, pero NO fallamos
           for i in $(seq 1 30); do
             pm_ok=0; set_ok=0
             adb -s $dev shell 'pm path android >/dev/null 2>&1' && pm_ok=1 || pm_ok=0
