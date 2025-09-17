@@ -148,7 +148,7 @@ jobs:
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
-            echo "hw.cpu.ncore=3"
+            echo "hw.cpu.ncore=4"
             echo "hw.ramSize=4096"
             echo "vm.heapSize=576"
             echo "tag.id=google_apis"
@@ -156,47 +156,47 @@ jobs:
             echo "disk.dataPartition.size=4096M"
           } >> "$AVD_CFG"
 
-      - name: Iniciar emulador (HVF headless) y esperar boot
+
+      - name: Iniciar emulador (headless, sin HVF) y esperar boot
         shell: bash
         run: |
           set -eux
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
           # Info opcional
-          emulator -accel-check || true
           emulator -list-avds || true
 
-          # 1) Lanzar en background
+          # Lanzar SIN aceleración (HVF off) y sin métricas
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
+            -accel off -no-metrics \
             -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
             > emulator.log 2>&1 &
 
-          # 2) ADB server
+          # ADB server y detección de serial real
           adb start-server
-
-          # 3) Detectar serial real (emulator-XXXX)
           DEV=""
-          for i in {1..60}; do
+          for i in {1..90}; do
             DEV="$(adb devices | awk '/emulator-/{print $1; exit}')"
             [ -n "$DEV" ] && break || true
             sleep 2
           done
           if [ -z "$DEV" ]; then
-            echo "No se detectó ningún emulator-* en 120s"; tail -n +1 emulator.log || true; exit 1
+            echo "No se detectó ningún emulator-* a tiempo"; tail -n +1 emulator.log || true; exit 1
           fi
           echo "DEV detectado: $DEV"
           echo "ANDROID_SERIAL=$DEV" >> "$GITHUB_ENV"
 
-          # 4) Esperar boot del framework (máx ~5 min)
+          # Esperar boot del framework (máx ~7 min en software)
           BOOT_OK=0
-          for i in {1..300}; do
+          for i in {1..420}; do
             if adb -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then BOOT_OK=1; break; fi
             sleep 1
           done
           if [ "$BOOT_OK" -ne 1 ]; then
-            echo "El emulador no booteó a tiempo"; tail -n +1 emulator.log || true; exit 1
+            echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log || true; exit 1
           fi
+
 
       - name: Desbloquear y desactivar animaciones
         shell: bash
