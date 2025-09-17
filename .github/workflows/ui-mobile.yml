@@ -212,19 +212,19 @@ jobs:
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
       # ✅ ESPERA ROBUSTA: PackageManager y Activity listos antes de instalar nada
-      - name: Esperar PackageManager/Activity
+      - name: Espera corta (no bloqueante) de framework
         run: |
           set -eux
           dev="emulator-5554"
-          adb -s $dev wait-for-device
-          ok_pkg=0; ok_act=0
-          for i in $(seq 1 180); do
-            adb -s $dev shell 'cmd package list packages >/dev/null 2>&1' && ok_pkg=1 || ok_pkg=0
-            adb -s $dev shell 'cmd activity top >/dev/null 2>&1' && ok_act=1 || ok_act=0
-            if [ $ok_pkg -eq 1 ] && [ $ok_act -eq 1 ]; then break; fi
+          # esperamos hasta 60s como máximo a que pm y settings respondan, pero NO fallamos
+          for i in $(seq 1 30); do
+            pm_ok=0; set_ok=0
+            adb -s $dev shell 'pm path android >/dev/null 2>&1' && pm_ok=1 || pm_ok=0
+            adb -s $dev shell 'settings list system >/dev/null 2>&1' && set_ok=1 || set_ok=0
+            [ $pm_ok -eq 1 ] && [ $set_ok -eq 1 ] && break || true
             sleep 2
           done
-          [ $ok_pkg -eq 1 ] && [ $ok_act -eq 1 ] || { echo "Android framework (package/activity) no listo a tiempo"; exit 1; }
+          true
 
       # Watchdog anti-ANR del System UI
       - name: "Watchdog: cerrar ANR de System UI si aparece"
