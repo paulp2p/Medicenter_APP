@@ -24,13 +24,16 @@ env:
   APK_LOCAL_NAME: medicenter_app.apk
   PY_VERSION: "3.11"
 
+  # Appium
   USE_APPIUM: "true"
   APPIUM_HOST: "127.0.0.1"
   APPIUM_PORT: "4723"
 
+  # Google Drive / rclone
   RCLONE_REMOTE: "gdrive"
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
 
+  # (Opcional según tu framework)
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
@@ -71,6 +74,7 @@ jobs:
             pip install behave selenium appium-python-client allure-behave
           fi
 
+      # ---------- RCLONE ----------
       - name: Instalar rclone y utilidades
         run: |
           set -eux
@@ -99,6 +103,7 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
+      # ---------- Dependencias del emulador ----------
       - name: Instalar dependencias del emulador (libs)
         run: |
           set -eux
@@ -110,6 +115,7 @@ jobs:
             libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
             libfontconfig1 ca-certificates
 
+      # ---------- ANDROID SDK + EMULADOR ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
         run: |
           set -eux
@@ -158,10 +164,11 @@ jobs:
       - name: Iniciar emulador (headless, TCG software) y esperar boot
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           export ANDROID_EMULATOR_USE_SYSTEM_LIBS=1
 
+          : > emulator.log
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
             -accel off -no-metrics \
@@ -172,6 +179,12 @@ jobs:
 
           DEV=""
           for i in {1..120}; do
+            # Si el emulador se cae, fallar rápido con log
+            if ! pgrep -f "emulator.*-avd $AVD_NAME" >/dev/null 2>&1; then
+              echo "❌ El emulador se detuvo. Últimas líneas:"
+              tail -n +200 emulator.log || true
+              exit 1
+            fi
             DEV="$(adb devices | awk '/emulator-/{print $1; exit}')"
             [ -n "$DEV" ] && break || true
             sleep 2
@@ -206,19 +219,26 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          NPM_BIN="$(npm bin -g || true)"
-          [ -n "$NPM_BIN" ] && { echo "$NPM_BIN" >> "$GITHUB_PATH"; export PATH="$NPM_BIN:$PATH"; }
+
+          # PATH de npm global (npm v10)
+          NPM_BIN="$(npm root -g)/.bin"
+          if [ -d "$NPM_BIN" ]; then
+            echo "$NPM_BIN" >> "$GITHUB_PATH"
+            export PATH="$NPM_BIN:$PATH"
+          fi
           node -v; npm -v
 
-          npm i -g appium appium-uiautomator2-driver
+          npm i -g appium@3 appium-uiautomator2-driver@latest
           appium --version
           appium driver install uiautomator2 || true
 
-          if command -v fuser >/dev/null 2>&1; then fuser -k 4723/tcp || true; fi
-          if command -v lsof  >/dev/null 2>&1; then lsof -ti tcp:4723 | xargs -r kill -9 || true; fi
+          # Liberar puerto 4723 si quedó algo
+          command -v fuser >/dev/null 2>&1 && fuser -k 4723/tcp || true
+          command -v lsof  >/dev/null 2>&1 && lsof -ti tcp:4723 | xargs -r kill -9 || true
 
           : > appium.log
-          nohup appium --allow-insecure=adb_shell \
+          nohup appium \
+            --allow-insecure "*:adb_shell" \
             --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
 
           for i in $(seq 1 120); do
@@ -226,11 +246,10 @@ jobs:
               echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"; break
             fi
             if ! pgrep -f "appium .*--port $APPIUM_PORT" >/dev/null; then
-              echo "Appium se detuvo inesperadamente:"; tail -n +1 appium.log || true; exit 1
+              echo "Appium se detuvo inesperadamente:"; tail -n +200 appium.log || true; exit 1
             fi
             sleep 1
           done
-
           curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
             || { echo "Appium no responde en /status"; tail -n +200 appium.log || true; exit 1; }
 
@@ -272,7 +291,7 @@ jobs:
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
 
-      - name: Capturar logcat para diagnóstico
+      - name: Capturar logcat para diagnóstico (no bloqueante)
         if: always()
         shell: bash
         run: |
