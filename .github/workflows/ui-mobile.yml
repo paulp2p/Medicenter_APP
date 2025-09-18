@@ -1,4 +1,4 @@
-name: Medicenter_app Tests (APK desde Drive, Ubuntu)
+name: Android Behave Tests (APK desde Drive, Ubuntu)
 
 on:
   workflow_dispatch:
@@ -79,7 +79,7 @@ jobs:
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y rclone curl netcat-openbsd unzip
+          sudo apt-get install -y rclone curl netcat-openbsd
 
       - name: Configurar rclone (desde secreto base64)
         env:
@@ -103,18 +103,6 @@ jobs:
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
-      # ---------- Dependencias del emulador ----------
-      - name: Instalar dependencias del emulador (libs)
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y \
-            libpulse0 libasound2t64 libnss3 \
-            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
-            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
-            libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
-            libfontconfig1 ca-certificates
-
       # ---------- ANDROID SDK + EMULADOR ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
         shell: bash
@@ -123,14 +111,12 @@ jobs:
           mkdir -p "$ANDROID_SDK_ROOT"
           cd "$ANDROID_SDK_ROOT"
 
-          # Descargar cmdline-tools
           curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           mkdir -p cmdline-tools
           unzip -q cmdline-tools.zip -d cmdline-tools
           mv cmdline-tools/cmdline-tools cmdline-tools/latest
           rm -f cmdline-tools.zip
 
-          # PATHs
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
@@ -138,20 +124,17 @@ jobs:
 
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-          # Aceptar licencias (evita fallo por Broken pipe)
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
 
-          # Instalar paquetes del SDK (también con yes protegido)
           PACKS=(
             "platform-tools"
             "emulator"
             "platforms;android-${API_LEVEL}"
             "build-tools;30.0.3"
-            "system-images;android-${API_LEVEL};google_apis;x86_64"
+            "system-images;android-${API_LEVEL};default;x86_64"
           )
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "${PACKS[@]}" ) || true
 
-          # Mostrar versiones para diagnóstico
           adb version
           emulator -version
 
@@ -161,16 +144,16 @@ jobs:
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           mkdir -p "$ANDROID_AVD_HOME"
           yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};google_apis;x86_64" \
+            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};default;x86_64" \
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
             echo "hw.cpu.ncore=3"
             echo "hw.ramSize=3072"
             echo "vm.heapSize=512"
-            echo "tag.id=google_apis"
-            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
-            echo "disk.dataPartition.size=2048M"
+            echo "tag.id=default"
+            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64"
+            echo "disk.dataPartition.size=4096M"
           } >> "$AVD_CFG"
 
       - name: Iniciar emulador (headless, TCG software) y esperar boot
@@ -184,18 +167,15 @@ jobs:
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
             -accel off -no-metrics \
-            -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
+            -gpu off -noaudio -camera-back none -camera-front none \
             > emulator.log 2>&1 &
 
           adb start-server
 
           DEV=""
           for i in {1..120}; do
-            # Si el emulador se cae, fallar rápido con log
             if ! pgrep -f "emulator.*-avd $AVD_NAME" >/dev/null 2>&1; then
-              echo "El emulador se detuvo. Últimas líneas:"
-              tail -n +200 emulator.log || true
-              exit 1
+              echo "❌ El emulador se detuvo. Últimas líneas:"; tail -n +200 emulator.log || true; exit 1
             fi
             DEV="$(adb devices | awk '/emulator-/{print $1; exit}')"
             [ -n "$DEV" ] && break || true
@@ -204,12 +184,13 @@ jobs:
           [ -n "$DEV" ] || { echo "No se detectó ningún emulator-* a tiempo"; tail -n +200 emulator.log || true; exit 1; }
           echo "ANDROID_SERIAL=$DEV" >> "$GITHUB_ENV"
 
-          BOOT_OK=0
+          # Boot básico
           for i in {1..600}; do
-            adb -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | grep -q "1" && { BOOT_OK=1; break; } || true
+            adb -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | grep -q "1" && break || true
             sleep 1
           done
-          [ "$BOOT_OK" -eq 1 ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log || true; exit 1; }
+          adb -s "$DEV" shell getprop sys.boot_completed | grep -q "1" || {
+            echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log || true; exit 1; }
 
       - name: Desbloquear y desactivar animaciones
         shell: bash
@@ -220,7 +201,7 @@ jobs:
           adb -s "$dev" shell input keyevent 224 || true
           adb -s "$dev" shell wm dismiss-keyguard || true
           adb -s "$dev" shell input keyevent 82 || true
-          adb -s "$dev" shell input keyevent 3 || true
+          adb -s "$dev" shell input keyevent 3  || true
           adb -s "$dev" shell settings put global window_animation_scale 0 || true
           adb -s "$dev" shell settings put global transition_animation_scale 0 || true
           adb -s "$dev" shell settings put global animator_duration_scale 0 || true
@@ -231,27 +212,19 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # PATH de npm global (npm v10)
           NPM_BIN="$(npm root -g)/.bin"
           if [ -d "$NPM_BIN" ]; then
             echo "$NPM_BIN" >> "$GITHUB_PATH"
             export PATH="$NPM_BIN:$PATH"
           fi
           node -v; npm -v
-
           npm i -g appium@3 appium-uiautomator2-driver@latest
           appium --version
           appium driver install uiautomator2 || true
-
-          # Liberar puerto 4723 si quedó algo
           command -v fuser >/dev/null 2>&1 && fuser -k 4723/tcp || true
           command -v lsof  >/dev/null 2>&1 && lsof -ti tcp:4723 | xargs -r kill -9 || true
-
           : > appium.log
-          nohup appium \
-            --allow-insecure "*:adb_shell" \
-            --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
-
+          nohup appium --allow-insecure=adb_shell --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
           for i in $(seq 1 120); do
             if curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null; then
               echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"; break
@@ -264,7 +237,33 @@ jobs:
           curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
             || { echo "Appium no responde en /status"; tail -n +200 appium.log || true; exit 1; }
 
-      - name: Instalar APK en el emulador
+      - name: Esperar estabilidad del sistema (PM + Settings)
+        shell: bash
+        run: |
+          set -eux
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
+
+          # Revalidar boot por si system_server se reinició
+          for i in {1..180}; do
+            if adb -s "$dev" shell getprop sys.boot_completed | grep -q "1" \
+               && adb -s "$dev" shell getprop dev.bootcomplete | grep -q "1"; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "Comprobando PackageManager y Settings provider..."
+          for i in {1..120}; do
+            if adb -s "$dev" shell 'pm path android >/dev/null 2>&1' \
+               && adb -s "$dev" shell 'cmd package list packages >/dev/null 2>&1' \
+               && adb -s "$dev" shell 'settings list global >/dev/null 2>&1'; then
+               echo "PM y Settings OK"; break
+            fi
+            sleep 2
+          done
+
+      - name: Instalar APK en el emulador (con reintentos)
         shell: bash
         run: |
           set -eux
@@ -272,31 +271,21 @@ jobs:
           [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
           adb devices
 
-          # Esperar a que el servicio de paquetes esté listo
-          echo "Esperando a que 'package' esté listo..."
-          MAX_RETRIES=30
-          RETRY_COUNT=0
-          while true; do
-            if adb -s "$dev" shell "cmd package list packages" >/dev/null 2>&1; then
-              echo "Servicio 'package' listo."
-              break
-            fi
-            if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-              echo "Error: 'package' no se ha iniciado a tiempo."
-              exit 1
-            fi
-            echo "Aún no está listo. Reintentando en 5s..."
-            sleep 5
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-          done
-
           if [ -n "${APP_PACKAGE:-}" ]; then
-            echo "Desinstalando ${APP_PACKAGE} (si existe)..."
+            echo "Desinstalando ${APP_PACKAGE} si existe..."
             adb -s "$dev" uninstall "${APP_PACKAGE}" || true
           fi
 
           echo "Instalando ${APK_LOCAL_NAME}..."
-          adb -s "$dev" install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+          ok=0
+          for attempt in 1 2 3; do
+            if adb -s "$dev" install -r "${APK_LOCAL_NAME}" | tee adb-install.log; then
+              ok=1; break
+            fi
+            echo "Instalación falló (intento $attempt). Esperando 10s y reintentando..."
+            sleep 10
+          done
+          [ "$ok" -eq 1 ] || { echo "Fallo al instalar APK tras reintentos"; exit 1; }
 
       - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'
