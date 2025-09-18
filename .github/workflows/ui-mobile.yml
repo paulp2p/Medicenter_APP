@@ -74,13 +74,25 @@ jobs:
             pip install behave selenium appium-python-client allure-behave
           fi
 
-      # ---------- RCLONE ----------
-      - name: Instalar rclone y utilidades
+      # ---------- SISTEMA / UTILS + LIBS DEL EMULADOR (ANTES DEL SDK) ----------
+      - name: Instalar utilidades de sistema y rclone
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y rclone curl netcat-openbsd
+          sudo apt-get install -y unzip curl netcat-openbsd rclone
 
+      - name: Instalar dependencias del emulador (libs requeridas)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpulse0 libasound2t64 libnss3 \
+            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
+            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
+            libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
+            libfontconfig1 ca-certificates
+
+      # ---------- RCLONE ----------
       - name: Configurar rclone (desde secreto base64)
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
@@ -124,6 +136,7 @@ jobs:
 
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
+          # Licencias (evita fallo por 'Broken pipe' si yes cierra antes)
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
 
           PACKS=(
@@ -244,7 +257,6 @@ jobs:
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
           [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
 
-          # Revalidar boot por si system_server se reinició
           for i in {1..180}; do
             if adb -s "$dev" shell getprop sys.boot_completed | grep -q "1" \
                && adb -s "$dev" shell getprop dev.bootcomplete | grep -q "1"; then
