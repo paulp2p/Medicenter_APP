@@ -12,14 +12,24 @@ from pages.registro_page import RegistroPage
 from pages.historia_clinica_page import Historia_clinica
 
 from appium.webdriver.common.appiumby import AppiumBy
-from utils.mailtm_client import MailTmClient
 
+# Esperas explícitas Selenium/Appium
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
+
+# --------------------------------------------------------------------
+# Utilidades de espera
+# --------------------------------------------------------------------
 
 def _set_implicit_wait(driver, seconds: float):
+    """Evitar implícitas largas cuando usamos explícitas: mantener bajo (0–1s)."""
     try:
         driver.implicitly_wait(seconds)
     except Exception:
         pass
+
 
 def _has_active_session(driver) -> bool:
     try:
@@ -27,51 +37,102 @@ def _has_active_session(driver) -> bool:
     except Exception:
         return False
 
-def esperar_inicio_app(driver, timeout=25):
-    print("[INFO] Esperando a que la app cargue completamente...")
-    _set_implicit_wait(driver, 0.5)
-    fin = time.time() + timeout
-    ok = False
-    posibles_anchos = [
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().description("Sign in")'),
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Log in")'),
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Sign in")'),
-    ]
-    while time.time() < fin and not ok:
-        for by, val in posibles_anchos:
+
+class _AnyElementLocated:
+    """ExpectedCondition: devuelve el primer elemento encontrado entre varios selectores."""
+    def __init__(self, locators):
+        # locators: List[Tuple[by, value]]
+        self.locators = locators
+
+    def __call__(self, driver):
+        for by, val in self.locators:
             try:
                 elems = driver.find_elements(by, val)
                 if elems:
-                    ok = True
-                    break
+                    return elems[0]
             except Exception:
+                # ignoramos y probamos el siguiente
                 pass
-        if not ok:
-            time.sleep(0.4)
-    if ok:
-        print("[INFO] La app cargó correctamente.")
-    else:
-        print("[WARN] No se encontró ancla de inicio dentro del timeout. Continuamos de todas formas.")
+        return False
 
-def _reset_app_state(driver, pkg: str, activity: str):
-    """ Limpia datos sin reinstalar y relanza en foreground. """
+
+def esperar_inicio_app(driver, timeout: int = 45):
+    """
+    Espera explícita a que aparezca algún ancla 'estable' de la pantalla inicial.
+    Usa múltiples posibles anclas (inglés/español).
+    """
+    print(f"[INFO] Esperando ancla de inicio (timeout={timeout}s) ...")
+    # Mantener implícita muy baja para no interferir con la explícita
+    _set_implicit_wait(driver, 0.5)
+
+    anclas = [
+        # Accesibility/description en inglés
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().description("Sign in")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Log in")'),
+        # Texto en inglés
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Sign in")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Log in")'),
+        # Texto en español (por si tu build muestra ES)
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Iniciar sesión")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Ingresar")'),
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Acceder")'),
+    ]
+
+    try:
+        wait = WebDriverWait(driver, timeout, poll_frequency=0.5)
+        elem = wait.until(_AnyElementLocated(anclas))
+        try:
+            # Dar 300ms para que estabilice el árbol
+            time.sleep(0.3)
+        except Exception:
+            pass
+        print(f"[INFO] Ancla encontrada: {elem}")
+        return True
+    except TimeoutException:
+        print("[WARN] No se encontró ancla de inicio dentro del timeout. Continuamos de todas formas.")
+        return False
+
+
+def _reset_app_state(driver, pkg: str, activity: str, timeout: int = 45):
+    """Limpia datos sin reinstalar y relanza en foreground, luego espera la pantalla inicial."""
     try:
         driver.execute_script("mobile: shell", {"command": "pm", "args": ["clear", pkg]})
     except Exception as e:
         print(f"[WARN] pm clear {pkg}: {e}")
+
     try:
         driver.terminate_app(pkg)
     except Exception:
         pass
+
     try:
-        driver.start_activity(pkg, activity)
-    except Exception:
+        # Si la activity es comodín '*', preferimos activate_app
+        if activity and activity != "*":
+            driver.start_activity(pkg, activity)
+        else:
+            driver.activate_app(pkg)
+    except Exception as e:
+        print(f"[WARN] start/activate {pkg}: {e}")
         try:
             driver.activate_app(pkg)
-        except Exception as e:
-            print(f"[WARN] start/activate {pkg}: {e}")
-    esperar_inicio_app(driver)
+        except Exception:
+            pass
 
+    # Cerrar diálogos del sistema que puedan tapar la UI
+    try:
+        driver.execute_script("mobile: shell", {
+            "command": "am", "args": ["broadcast", "-a", "android.intent.action.CLOSE_SYSTEM_DIALOGS"]
+        })
+    except Exception:
+        pass
+
+    # Espera a que la UI inicial esté lista
+    esperar_inicio_app(driver, timeout=timeout)
+
+
+# --------------------------------------------------------------------
+# Hooks Behave
+# --------------------------------------------------------------------
 
 def before_all(context):
     print("\n=== [SETUP GLOBAL] ===")
@@ -80,9 +141,17 @@ def before_all(context):
         context.configs = load_config(env)
         print(f"[INFO] Entorno de pruebas: {env}")
 
+        # Timeout de espera explícita centralizado (ajustable por ENV)
+        context.DEFAULT_WAIT = int(os.getenv("WAIT_UI_SEC", "45"))
+
         # Una sola sesión para toda la suite
         context.driver = create_driver(context.configs)
-        _set_implicit_wait(context.driver, 1.0)
+
+        # Implícita BAJA para no interferir con explícitas
+        _set_implicit_wait(context.driver, 0.5)
+
+        # WebDriverWait global de conveniencia
+        context.wait = WebDriverWait(context.driver, context.DEFAULT_WAIT)
 
         # Mails / datos
         context.mock_sms_base_url = str(context.configs.get("MOCK_SMS_BASE_URL", os.getenv("MOCK_SMS_BASE_URL", "http://127.0.0.1:8081")))
@@ -108,11 +177,14 @@ def before_scenario(context, scenario):
 
         if not _has_active_session(getattr(context, "driver", None)):
             context.driver = create_driver(context.configs)
+            _set_implicit_wait(context.driver, 0.5)
+            context.wait = WebDriverWait(context.driver, context.DEFAULT_WAIT)
 
-        # Limpieza ligera entre escenarios (sin reinstalar)
-        _reset_app_state(context.driver, app_package, app_activity)
+        # Limpieza ligera entre escenarios (sin reinstalar) y relanzar foreground
+        _reset_app_state(context.driver, app_package, app_activity, timeout=context.DEFAULT_WAIT)
 
         # páginas/clientes por escenario
+        from utils.mailtm_client import MailTmClient
         context.mail_client = MailTmClient(timeout=context.mail_tm_timeout)
         context.login_page = LoginPage(context.driver)
         context.registro_page = RegistroPage(context.driver, context.mail_client)
@@ -128,7 +200,7 @@ def before_scenario(context, scenario):
 
 def after_scenario(context, scenario):
     print(f"=== [TEARDOWN ESCENARIO] {scenario.name} ({scenario.status}) ===")
-    # Mantener la sesión viva es más estable en CI
+    # Mantener la sesión viva suele ser más estable en CI (emulador TCG).
     pass
 
 

@@ -317,6 +317,52 @@ jobs:
           done
           [ "$ok" -eq 1 ] || { echo "Fallo al instalar APK tras reintentos"; exit 1; }
 
+      - name: Instalar APK y warm-up de la app
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
+
+          adb devices
+
+          # Esperar a que 'package' responda (evita install a medio boot)
+          for i in {1..60}; do
+            adb -s "$dev" shell "cmd package list packages >/dev/null" && break || true
+            sleep 2
+          done
+
+          # Desinstalar previa (si aplica) e instalar
+          if [ -n "${APP_PACKAGE:-}" ]; then
+            adb -s "$dev" uninstall "${APP_PACKAGE}" || true
+          fi
+          adb -s "$dev" install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+
+          # Quitar el Setup Wizard para que no tape la app
+          adb -s "$dev" shell pm disable-user --user 0 com.google.android.setupwizard || true
+
+          # Descubrir la activity LAUNCHER si la especificada no coincide
+          if [ -n "${APP_PACKAGE:-}" ]; then
+            ACT_OUT="$(adb -s "$dev" shell cmd package resolve-activity -c android.intent.category.LAUNCHER "${APP_PACKAGE}" 2>/dev/null || true)"
+            ACT_NAME="$(printf '%s\n' "$ACT_OUT" | awk -F'name=' '/name=/{print $2}' | sed 's/}//g' | head -n1 || true)"
+            if [ -n "$ACT_NAME" ]; then
+              echo "APP_ACTIVITY=${ACT_NAME}" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          # Lanzar explícitamente la app y cerrar diálogos del sistema
+          if [ -n "${APP_PACKAGE:-}" ] && [ -n "${APP_ACTIVITY:-}" ]; then
+            adb -s "$dev" shell am start -W -n "${APP_PACKAGE}/${APP_ACTIVITY}" || true
+          else
+            # fallback: usar monkey si no tenemos activity
+            [ -n "${APP_PACKAGE:-}" ] && adb -s "$dev" shell monkey -p "${APP_PACKAGE}" -c android.intent.category.LAUNCHER 1 || true
+          fi
+          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+
+          # Confirmar que el proceso de la app existe y dar unos segundos de respiro
+          [ -n "${APP_PACKAGE:-}" ] && adb -s "$dev" shell pidof "${APP_PACKAGE}" || true
+          sleep 5
+
       - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'
         timeout-minutes: 55
