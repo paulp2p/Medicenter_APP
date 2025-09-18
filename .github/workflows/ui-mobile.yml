@@ -226,48 +226,47 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # Asegurar binarios globales de npm en PATH
+          # Asegura binarios globales de npm en el PATH
           NPM_BIN="$(npm root -g)/.bin"
           if [ -d "$NPM_BIN" ]; then
             echo "$NPM_BIN" >> "$GITHUB_PATH"
             export PATH="$NPM_BIN:$PATH"
           fi
-
           node -v; npm -v
+
+          # Appium 3 + driver UiAutomator2
           npm i -g appium@3 appium-uiautomator2-driver@latest
-          which appium || true
           appium --version
-          appium driver list --installed || true
           appium driver install uiautomator2 || true
 
-          # Liberar el puerto por si quedó tomado
-          command -v fuser >/dev/null 2>&1 && fuser -k "$APPIUM_PORT"/tcp || true
-          command -v lsof  >/dev/null 2>&1 && lsof -ti tcp:"$APPIUM_PORT" | xargs -r kill -9 || true
+          # Libera el puerto por si quedó algo colgado
+          command -v fuser >/dev/null 2>&1 && fuser -k 4723/tcp || true
+          command -v lsof  >/dev/null 2>&1 && lsof -ti tcp:4723 | xargs -r kill -9 || true
 
           : > appium.log
-          # Arrancar en 2º plano, guardar PID y usar log detallado
-          nohup appium server \
-            --address "$APPIUM_HOST" --port "$APPIUM_PORT" \
-            --log-level debug \
-            > appium.log 2>&1 & echo $! > appium.pid
+          nohup appium \
+            --relaxed-security \
+            --allow-insecure=adb_shell \
+            --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
 
-          # Esperar /status y validar que el proceso siga vivo
+          # Espera a /status, y si el proceso muere, falla con log útil
           for i in $(seq 1 120); do
             if curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null; then
-              echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"; break
+              echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"
+              break
             fi
-            if ! ps -p "$(cat appium.pid)" >/dev/null 2>&1; then
-              echo "Appium se detuvo. Log (primeras 300 líneas):"
-              sed -n '1,300p' appium.log || true
+            if ! pgrep -f "appium .*--port $APPIUM_PORT" >/dev/null; then
+              echo "Appium se detuvo inesperadamente. Últimas líneas:"
+              tail -n +200 appium.log || true
               exit 1
             fi
             sleep 1
           done
-
-          # Última verificación con dump útil si aún no responde
           curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
-            || { echo "Appium no responde en /status"; sed -n '1,400p' appium.log || true; exit 1; }
+            || { echo "Appium no responde en /status"; tail -n +200 appium.log || true; exit 1; }
 
+          echo "=== Verificación de flags de seguridad habilitados ==="
+          grep -Ei 'relaxed|insecure|adb_shell' appium.log || true
 
       - name: Esperar estabilidad del sistema (PM + Settings)
         shell: bash
