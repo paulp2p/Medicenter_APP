@@ -264,9 +264,9 @@ jobs:
             sleep 1
           done
 
-    # Última verificación con dump útil si aún no responde
-    curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
-      || { echo "Appium no responde en /status"; sed -n '1,400p' appium.log || true; exit 1; }
+          # Última verificación con dump útil si aún no responde
+          curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
+            || { echo "Appium no responde en /status"; sed -n '1,400p' appium.log || true; exit 1; }
 
 
       - name: Esperar estabilidad del sistema (PM + Settings)
