@@ -271,52 +271,48 @@ jobs:
           curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
             || { echo "Appium no responde en /status"; sed -n '1,400p' appium.log || true; exit 1; }
 
-      - name: Instalar APK en el emulador (robusto, sin streaming)
+      - name: Instalar APK en el emulador (robusto)
         shell: bash
         run: |
           set -euxo pipefail
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
           [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
 
-          adb devices
+          adb -s "$dev" wait-for-device
 
-          # 1) Esperar a que el Package Manager responda de forma estable
-          for i in {1..90}; do
-            if adb -s "$dev" shell "cmd package list packages >/dev/null 2>&1"; then
-              break
-            fi
-            sleep 2
+          # Esperar a que el framework termine de bootear
+          deadline=$((SECONDS+600))   # hasta 10 min si hace falta
+          until adb -s "$dev" shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do
+            [ $SECONDS -lt $deadline ] || { echo "[boot] timeout esperando sys.boot_completed"; exit 1; }
+            sleep 1
           done
 
-          # 2) Desbloquear y asegurar /data/local/tmp
-          adb -s "$dev" shell "mkdir -p /data/local/tmp && chmod 777 /data/local/tmp" || true
+          # Esperar a que el servicio 'package' esté disponible
+          until adb -s "$dev" shell cmd -l 2>/dev/null | grep -q '^package$'; do
+            [ $SECONDS -lt $deadline ] || { echo "[pm] timeout esperando servicio 'package'"; exit 1; }
+            sleep 1
+          done
 
-          # 3) “Limpiar” la app si existe (a veces uninstall falla con INTERNAL_ERROR)
+          # Un poco de higiene: desactivar verificación de installs ADB (a veces acelera)
+          adb -s "$dev" shell settings put global verifier_verify_adb_installs 0 || true
+
+          # Limpiar cualquier resto de la app (sin fallar la build si no está)
           if [ -n "${APP_PACKAGE:-}" ]; then
             adb -s "$dev" shell "am force-stop ${APP_PACKAGE}" || true
             adb -s "$dev" shell "pm clear ${APP_PACKAGE}" || true
-            adb -s "$dev" shell "cmd package uninstall -k --user 0 ${APP_PACKAGE}" || true
+            adb -s "$dev" uninstall "${APP_PACKAGE}" || true
           fi
 
-          # 4) Subir el APK al device (evita streaming por Binder)
-          adb -s "$dev" shell "rm -f /data/local/tmp/app-under-test.apk" || true
-          adb -s "$dev" push -p "${APK_LOCAL_NAME}" /data/local/tmp/app-under-test.apk
-          adb -s "$dev" shell "ls -lh /data/local/tmp/app-under-test.apk"
-
-          # 5) Instalar desde el archivo local (1er intento)
-          if adb -s "$dev" shell "pm install -r -t -d --user 0 /data/local/tmp/app-under-test.apk"; then
-            echo "Instalación OK (pm install desde path)"
-          else
-            echo "Primer intento falló; probando instalación por 'session'…"
-            # 6) Fallback por sesiones (más tolerante en TCG)
-            size=$(stat -c%s "${APK_LOCAL_NAME}")
-            sess=$(adb -s "$dev" shell "cmd package install-create -r -t -d" | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)
+          # Intento 1: instalación "streamed" normal
+          if ! adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}"; then
+            echo "Instalación streamed falló; probando instalación por 'session'..."
+            adb -s "$dev" push -p "${APK_LOCAL_NAME}" /data/local/tmp/app-under-test.apk
+            sess="$(adb -s "$dev" shell 'cmd package install-create -r -d -t' \
+                    | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)"
             [ -n "$sess" ] || { echo "No se pudo crear sesión de instalación"; exit 1; }
-            adb -s "$dev" shell "cmd package install-write -S $size $sess base -" < "${APK_LOCAL_NAME}"
-            adb -s "$dev" shell "cmd package install-commit $sess"
-            echo "Instalación OK (vía session)"
+            adb -s "$dev" shell "cmd package install-write ${sess} base /data/local/tmp/app-under-test.apk"
+            adb -s "$dev" shell "cmd package install-commit ${sess}"
           fi
-
 
       - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'
