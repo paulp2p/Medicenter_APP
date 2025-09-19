@@ -271,44 +271,52 @@ jobs:
           curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
             || { echo "Appium no responde en /status"; sed -n '1,400p' appium.log || true; exit 1; }
 
-      - name: Instalar APK y warm-up de la app
+      - name: Instalar APK en el emulador (robusto, sin streaming)
+        shell: bash
         run: |
           set -euxo pipefail
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
           [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
+
           adb devices
 
-          # Servicio 'package' listo
-          for i in {1..60}; do
-            adb -s "$dev" shell "cmd package list packages >/dev/null" && break || true
+          # 1) Esperar a que el Package Manager responda de forma estable
+          for i in {1..90}; do
+            if adb -s "$dev" shell "cmd package list packages >/dev/null 2>&1"; then
+              break
+            fi
             sleep 2
           done
 
-          # Espacio y estado (diagnóstico)
-          adb -s "$dev" shell df -h /data || true
+          # 2) Desbloquear y asegurar /data/local/tmp
+          adb -s "$dev" shell "mkdir -p /data/local/tmp && chmod 777 /data/local/tmp" || true
 
-          # Desinstalar previa e instalar con flags tolerantes
-          if [ -n "${APP_PACKAGE:-}" ]; then adb -s "$dev" uninstall "${APP_PACKAGE}" || true; fi
-          adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}" | tee adb-install.log
-
-          # Desactivar Setup Wizard que tapa UI
-          adb -s "$dev" shell pm disable-user --user 0 com.google.android.setupwizard || true
-
-          # Descubrir la activity launcher real (si cambia)
+          # 3) “Limpiar” la app si existe (a veces uninstall falla con INTERNAL_ERROR)
           if [ -n "${APP_PACKAGE:-}" ]; then
-            ACT_OUT="$(adb -s "$dev" shell cmd package resolve-activity -c android.intent.category.LAUNCHER "${APP_PACKAGE}" 2>/dev/null || true)"
-            ACT_NAME="$(printf '%s\n' "$ACT_OUT" | awk -F'name=' '/name=/{print $2}' | sed 's/}//g' | head -n1 || true)"
-            if [ -n "$ACT_NAME" ]; then echo "APP_ACTIVITY=$ACT_NAME" >> "$GITHUB_ENV"; fi
+            adb -s "$dev" shell "am force-stop ${APP_PACKAGE}" || true
+            adb -s "$dev" shell "pm clear ${APP_PACKAGE}" || true
+            adb -s "$dev" shell "cmd package uninstall -k --user 0 ${APP_PACKAGE}" || true
           fi
 
-          # Lanzar la app y cerrar diálogos
-          if [ -n "${APP_PACKAGE:-}" ] && [ -n "${APP_ACTIVITY:-}" ]; then
-            adb -s "$dev" shell am start -W -n "${APP_PACKAGE}/${APP_ACTIVITY}" || true
+          # 4) Subir el APK al device (evita streaming por Binder)
+          adb -s "$dev" shell "rm -f /data/local/tmp/app-under-test.apk" || true
+          adb -s "$dev" push -p "${APK_LOCAL_NAME}" /data/local/tmp/app-under-test.apk
+          adb -s "$dev" shell "ls -lh /data/local/tmp/app-under-test.apk"
+
+          # 5) Instalar desde el archivo local (1er intento)
+          if adb -s "$dev" shell "pm install -r -t -d --user 0 /data/local/tmp/app-under-test.apk"; then
+            echo "Instalación OK (pm install desde path)"
           else
-            [ -n "${APP_PACKAGE:-}" ] && adb -s "$dev" shell monkey -p "${APP_PACKAGE}" -c android.intent.category.LAUNCHER 1 || true
+            echo "Primer intento falló; probando instalación por 'session'…"
+            # 6) Fallback por sesiones (más tolerante en TCG)
+            size=$(stat -c%s "${APK_LOCAL_NAME}")
+            sess=$(adb -s "$dev" shell "cmd package install-create -r -t -d" | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)
+            [ -n "$sess" ] || { echo "No se pudo crear sesión de instalación"; exit 1; }
+            adb -s "$dev" shell "cmd package install-write -S $size $sess base -" < "${APK_LOCAL_NAME}"
+            adb -s "$dev" shell "cmd package install-commit $sess"
+            echo "Instalación OK (vía session)"
           fi
-          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
-          sleep 5
+
 
       - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'
