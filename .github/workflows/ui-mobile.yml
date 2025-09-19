@@ -33,12 +33,11 @@ env:
   RCLONE_REMOTE: "gdrive"
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
 
-  # App under test
+  # App bajo prueba
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
-  # Esperas de UI (las usa environment.py)
-  WAIT_UI_SEC: "60"
+  WAIT_UI_SEC: "45"
 
 jobs:
   android-behave:
@@ -68,7 +67,6 @@ jobs:
           cache: "pip"
 
       - name: Instalar dependencias Python
-        shell: bash
         run: |
           set -eux
           python -m pip install -U pip
@@ -78,18 +76,29 @@ jobs:
             pip install behave selenium appium-python-client allure-behave
           fi
 
-      # ---------- RCLONE ----------
-      - name: Instalar rclone y utilidades
-        shell: bash
+      # ---------- LIBRERÍAS DEL EMULADOR (PRIMERO) ----------
+      - name: Instalar dependencias del emulador (libs)
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y rclone curl netcat-openbsd unzip
+          sudo apt-get install -y \
+            unzip curl netcat-openbsd \
+            libpulse0 libasound2t64 libnss3 \
+            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
+            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
+            libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
+            libfontconfig1 ca-certificates
+
+      # ---------- RCLONE ----------
+      - name: Instalar rclone
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y rclone
 
       - name: Configurar rclone (desde secreto base64)
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -n "${RCLONE_CONF_B64:-}" ] || { echo "Falta secrets.RCLONE_CONF_B64"; exit 1; }
@@ -102,7 +111,6 @@ jobs:
           rclone listremotes
 
       - name: "Smoke test: acceso a Drive y descarga de APK"
-        shell: bash
         run: |
           set -eux
           rclone ls "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}"
@@ -111,12 +119,10 @@ jobs:
 
       # ---------- ANDROID SDK + EMULADOR ----------
       - name: Instalar Android SDK (cmdline-tools) y componentes
-        shell: bash
         run: |
           set -eux
           mkdir -p "$ANDROID_SDK_ROOT"
           cd "$ANDROID_SDK_ROOT"
-
           curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           mkdir -p cmdline-tools
           unzip -q cmdline-tools.zip -d cmdline-tools
@@ -129,18 +135,17 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-          # Aceptar licencias e instalar paquetes (fail-safe)
+          # Aceptar licencias e instalar paquetes (con fail-safe para “Broken pipe”)
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
-            "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-            "build-tools;30.0.3" \
-            "system-images;android-${API_LEVEL};google_apis;x86_64" ) || true
+              "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
+              "build-tools;30.0.3" \
+              "system-images;android-${API_LEVEL};google_apis;x86_64" ) || true
 
           adb version
           emulator -version
 
       - name: Crear AVD
-        shell: bash
         run: |
           set -eux
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
@@ -155,11 +160,10 @@ jobs:
             echo "vm.heapSize=512"
             echo "tag.id=google_apis"
             echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/google_apis/x86_64"
-            echo "disk.dataPartition.size=2048M"
+            echo "disk.dataPartition.size=4096M"
           } >> "$AVD_CFG"
 
       - name: Iniciar emulador (headless, TCG software) y esperar boot
-        shell: bash
         run: |
           set -euxo pipefail
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
@@ -177,11 +181,8 @@ jobs:
 
           DEV=""
           for i in {1..120}; do
-            # Si el emulador se cae, fallar rápido con log
             if ! pgrep -f "emulator.*-avd $AVD_NAME" >/dev/null 2>&1; then
-              echo "❌ El emulador se detuvo. Últimas líneas:"
-              tail -n +1 emulator.log || true
-              exit 1
+              echo "❌ El emulador se detuvo. Últimas líneas:"; tail -n +1 emulator.log || true; exit 1
             fi
             DEV="$(adb devices | awk '/emulator-/{print $1; exit}')"
             [ -n "$DEV" ] && break || true
@@ -190,7 +191,6 @@ jobs:
           [ -n "$DEV" ] || { echo "No se detectó ningún emulator-* a tiempo"; tail -n +200 emulator.log || true; exit 1; }
           echo "ANDROID_SERIAL=$DEV" >> "$GITHUB_ENV"
 
-          # Esperar boot del framework (hasta 5 min)
           BOOT_OK=0
           for i in {1..300}; do
             adb -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | grep -q "1" && { BOOT_OK=1; break; } || true
@@ -199,7 +199,6 @@ jobs:
           [ "$BOOT_OK" -eq 1 ] || { echo "El emulador no booteó a tiempo"; tail -n +200 emulator.log || true; exit 1; }
 
       - name: Desbloquear y desactivar animaciones
-        shell: bash
         run: |
           set -eux
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
@@ -214,7 +213,6 @@ jobs:
           adb -s "$dev" shell svc power stayon true || true
 
       - name: Espera corta (no bloqueante) de framework
-        shell: bash
         run: |
           set -eux
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
@@ -227,8 +225,7 @@ jobs:
           done
           true
 
-      - name: "Watchdog: cerrar ANR de System UI si aparece"
-        shell: bash
+      - name: Watchdog: cerrar ANR de System UI si aparece
         run: |
           set -eux
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
@@ -244,14 +241,10 @@ jobs:
 
       - name: Instalar y arrancar Appium
         if: env.USE_APPIUM == 'true'
-        shell: bash
         run: |
           set -euxo pipefail
           NPM_BIN="$(npm root -g)/.bin"
-          if [ -d "$NPM_BIN" ]; then
-            echo "$NPM_BIN" >> "$GITHUB_PATH"
-            export PATH="$NPM_BIN:$PATH"
-          fi
+          if [ -d "$NPM_BIN" ]; then echo "$NPM_BIN" >> "$GITHUB_PATH"; export PATH="$NPM_BIN:$PATH"; fi
           node -v; npm -v
 
           npm i -g appium@3 appium-uiautomator2-driver@latest
@@ -259,14 +252,11 @@ jobs:
           appium --version
           appium driver install uiautomator2 || true
 
-          # Liberar puerto 4723 si quedó algo
           command -v fuser >/dev/null 2>&1 && fuser -k 4723/tcp || true
           command -v lsof  >/dev/null 2>&1 && lsof -ti tcp:4723 | xargs -r kill -9 || true
 
           : > appium.log
-          nohup appium \
-            --relaxed-security \
-            --allow-insecure=adb_shell \
+          nohup appium --relaxed-security --allow-insecure=adb_shell \
             --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
 
           for i in $(seq 1 120); do
@@ -274,50 +264,44 @@ jobs:
               echo "Appium OK en $APPIUM_HOST:$APPIUM_PORT"; break
             fi
             if ! pgrep -f "appium .*--port $APPIUM_PORT" >/dev/null; then
-              echo "Appium se detuvo inesperadamente. Últimas líneas:"
-              sed -n '1,400p' appium.log || true
-              exit 1
+              echo "Appium se detuvo inesperadamente. Últimas líneas:"; sed -n '1,400p' appium.log || true; exit 1
             fi
             sleep 1
           done
-
           curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" | head -c 500 \
             || { echo "Appium no responde en /status"; sed -n '1,400p' appium.log || true; exit 1; }
 
       - name: Instalar APK y warm-up de la app
-        shell: bash
         run: |
           set -euxo pipefail
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
           [ -n "$dev" ] || { echo "No hay device emulado"; exit 1; }
-
           adb devices
 
-          # Esperar a que 'package' responda (evita install a medio boot)
+          # Servicio 'package' listo
           for i in {1..60}; do
             adb -s "$dev" shell "cmd package list packages >/dev/null" && break || true
             sleep 2
           done
 
-          # Desinstalar previa (si aplica) e instalar
-          if [ -n "${APP_PACKAGE:-}" ]; then
-            adb -s "$dev" uninstall "${APP_PACKAGE}" || true
-          fi
-          adb -s "$dev" install -r "${APK_LOCAL_NAME}" | tee adb-install.log
+          # Espacio y estado (diagnóstico)
+          adb -s "$dev" shell df -h /data || true
 
-          # Quitar Setup Wizard para que no tape la UI
+          # Desinstalar previa e instalar con flags tolerantes
+          if [ -n "${APP_PACKAGE:-}" ]; then adb -s "$dev" uninstall "${APP_PACKAGE}" || true; fi
+          adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}" | tee adb-install.log
+
+          # Desactivar Setup Wizard que tapa UI
           adb -s "$dev" shell pm disable-user --user 0 com.google.android.setupwizard || true
 
-          # Descubrir activity launcher real si difiere
+          # Descubrir la activity launcher real (si cambia)
           if [ -n "${APP_PACKAGE:-}" ]; then
             ACT_OUT="$(adb -s "$dev" shell cmd package resolve-activity -c android.intent.category.LAUNCHER "${APP_PACKAGE}" 2>/dev/null || true)"
             ACT_NAME="$(printf '%s\n' "$ACT_OUT" | awk -F'name=' '/name=/{print $2}' | sed 's/}//g' | head -n1 || true)"
-            if [ -n "$ACT_NAME" ]; then
-              echo "APP_ACTIVITY=$ACT_NAME" >> "$GITHUB_ENV"
-            fi
+            if [ -n "$ACT_NAME" ]; then echo "APP_ACTIVITY=$ACT_NAME" >> "$GITHUB_ENV"; fi
           fi
 
-          # Lanzar explícitamente la app y cerrar diálogos del sistema
+          # Lanzar la app y cerrar diálogos
           if [ -n "${APP_PACKAGE:-}" ] && [ -n "${APP_ACTIVITY:-}" ]; then
             adb -s "$dev" shell am start -W -n "${APP_PACKAGE}/${APP_ACTIVITY}" || true
           else
@@ -336,7 +320,6 @@ jobs:
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
           APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
           WAIT_UI_SEC: ${{ env.WAIT_UI_SEC }}
-        shell: bash
         run: |
           set -eux
           export UDID="${ANDROID_SERIAL}"
@@ -357,7 +340,6 @@ jobs:
 
       - name: Capturar logcat para diagnóstico (no bloqueante)
         if: always()
-        shell: bash
         run: |
           set -euxo pipefail
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
@@ -388,7 +370,6 @@ jobs:
 
       - name: Apagar emulador y limpiar
         if: always()
-        shell: bash
         run: |
           set -eux
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
