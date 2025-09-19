@@ -225,7 +225,7 @@ jobs:
           done
           true
 
-      - name: Watchdog: cerrar ANR de System UI si aparece
+      - name: "Watchdog: cerrar ANR de System UI si aparece"
         run: |
           set -eux
           dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
