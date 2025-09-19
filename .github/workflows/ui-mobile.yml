@@ -227,7 +227,7 @@ jobs:
           done
           true
 
-      - name: Watchdog: cerrar ANR de System UI si aparece
+      - name: "Watchdog: cerrar ANR de System UI si aparece"
         shell: bash
         run: |
           set -eux
