@@ -12,24 +12,18 @@ from pages.registro_page import RegistroPage
 from pages.historia_clinica_page import Historia_clinica
 
 from appium.webdriver.common.appiumby import AppiumBy
-
-# Esperas explícitas Selenium/Appium
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 
-# --------------------------------------------------------------------
-# Utilidades de espera
-# --------------------------------------------------------------------
+# ------------------ utilidades de espera ------------------
 
 def _set_implicit_wait(driver, seconds: float):
-    """Evitar implícitas largas cuando usamos explícitas: mantener bajo (0–1s)."""
     try:
         driver.implicitly_wait(seconds)
     except Exception:
         pass
-
 
 def _has_active_session(driver) -> bool:
     try:
@@ -37,13 +31,75 @@ def _has_active_session(driver) -> bool:
     except Exception:
         return False
 
+def _broadcast_close_system_dialogs(driver):
+    try:
+        driver.execute_script("mobile: shell", {
+            "command": "am",
+            "args": ["broadcast", "-a", "android.intent.action.CLOSE_SYSTEM_DIALOGS"]
+        })
+    except Exception:
+        pass
+
+def _press_back(driver):
+    try:
+        # Android keycode BACK
+        driver.press_keycode(4)
+    except Exception:
+        try:
+            driver.execute_script("mobile: shell", {"command": "input", "args": ["keyevent", "4"]})
+        except Exception:
+            pass
+
+def handle_anr_popup(driver):
+    """
+    Intenta cerrar el diálogo de ANR (System UI isn’t responding) eligiendo 'Wait/Esperar'.
+    Si no se puede, envía BACK y cierra diálogos del sistema.
+    """
+    try:
+        # Buscar botones típicos del ANR
+        botones_wait = [
+            # EN
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches("(?i)wait")'),
+            # ES
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches("(?i)esperar|espera")'),
+        ]
+        botones_close = [
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches("(?i)close app")'),
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches("(?i)cerrar (app|aplicación)")'),
+        ]
+
+        for by, val in botones_wait:
+            els = driver.find_elements(by, val)
+            if els:
+                try:
+                    els[0].click()
+                    time.sleep(0.5)
+                    return True
+                except Exception:
+                    pass
+
+        # Si no hay "Wait", probamos cerrar el pop-up para recuperar el control
+        for by, val in botones_close:
+            els = driver.find_elements(by, val)
+            if els:
+                try:
+                    els[0].click()
+                    time.sleep(0.5)
+                    return True
+                except Exception:
+                    pass
+
+        # Plan B: BACK + broadcast
+        _press_back(driver)
+        _broadcast_close_system_dialogs(driver)
+    except Exception:
+        pass
+    return False
 
 class _AnyElementLocated:
-    """ExpectedCondition: devuelve el primer elemento encontrado entre varios selectores."""
+    """EC que devuelve el primer elemento encontrado entre varios selectores."""
     def __init__(self, locators):
-        # locators: List[Tuple[by, value]]
         self.locators = locators
-
     def __call__(self, driver):
         for by, val in self.locators:
             try:
@@ -51,64 +107,59 @@ class _AnyElementLocated:
                 if elems:
                     return elems[0]
             except Exception:
-                # ignoramos y probamos el siguiente
                 pass
         return False
 
-
 def esperar_inicio_app(driver, timeout: int = 45):
-    """
-    Espera explícita a que aparezca algún ancla 'estable' de la pantalla inicial.
-    Usa múltiples posibles anclas (inglés/español).
-    """
     print(f"[INFO] Esperando ancla de inicio (timeout={timeout}s) ...")
-    # Mantener implícita muy baja para no interferir con la explícita
     _set_implicit_wait(driver, 0.5)
 
     anclas = [
-        # Accesibility/description en inglés
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().description("Sign in")'),
-        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Log in")'),
-        # Texto en inglés
+        # EN
+        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Sign in")'),
         (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Sign in")'),
         (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Log in")'),
-        # Texto en español (por si tu build muestra ES)
+        # ES
         (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Iniciar sesión")'),
         (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Ingresar")'),
         (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("Acceder")'),
     ]
 
-    try:
-        wait = WebDriverWait(driver, timeout, poll_frequency=0.5)
-        elem = wait.until(_AnyElementLocated(anclas))
+    end = time.time() + timeout
+    while time.time() < end:
+        # intentar cerrar ANR si aparece
+        handle_anr_popup(driver)
         try:
-            # Dar 300ms para que estabilice el árbol
+            wait_short = WebDriverWait(driver, 2, poll_frequency=0.5)
+            el = wait_short.until(_AnyElementLocated(anclas))
             time.sleep(0.3)
-        except Exception:
-            pass
-        print(f"[INFO] Ancla encontrada: {elem}")
-        return True
-    except TimeoutException:
-        print("[WARN] No se encontró ancla de inicio dentro del timeout. Continuamos de todas formas.")
-        return False
+            print(f"[INFO] Ancla encontrada: {el}")
+            return True
+        except TimeoutException:
+            # cerrar diálogos del sistema y seguir
+            _broadcast_close_system_dialogs(driver)
+    print("[WARN] No se encontró ancla de inicio dentro del timeout. Continuamos de todas formas.")
+    return False
 
-
-def _reset_app_state(driver, pkg: str, activity: str, timeout: int = 45):
-    """Limpia datos sin reinstalar y relanza en foreground, luego espera la pantalla inicial."""
+def _start_or_activate(driver, pkg: str, activity: str):
+    """
+    Inicia activity con W3C 'mobile: startActivity'. Si no hay activity específica,
+    activa la app. Tolerante a clientes sin start_activity().
+    """
     try:
-        driver.execute_script("mobile: shell", {"command": "pm", "args": ["clear", pkg]})
-    except Exception as e:
-        print(f"[WARN] pm clear {pkg}: {e}")
-
-    try:
-        driver.terminate_app(pkg)
-    except Exception:
-        pass
-
-    try:
-        # Si la activity es comodín '*', preferimos activate_app
         if activity and activity != "*":
-            driver.start_activity(pkg, activity)
+            try:
+                driver.execute_script("mobile: startActivity", {
+                    "appPackage": pkg,
+                    "appActivity": activity
+                })
+            except Exception:
+                # fallback si el cliente expone start_activity
+                try:
+                    driver.start_activity(pkg, activity)  # puede no existir en tu client
+                except Exception as e2:
+                    print(f"[WARN] start_activity fallback: {e2}")
+                    driver.activate_app(pkg)
         else:
             driver.activate_app(pkg)
     except Exception as e:
@@ -118,21 +169,23 @@ def _reset_app_state(driver, pkg: str, activity: str, timeout: int = 45):
         except Exception:
             pass
 
-    # Cerrar diálogos del sistema que puedan tapar la UI
+def _reset_app_state(driver, pkg: str, activity: str, timeout: int = 45):
+    """ Limpia datos, relanza foreground, cierra diálogos y espera la pantalla inicial. """
     try:
-        driver.execute_script("mobile: shell", {
-            "command": "am", "args": ["broadcast", "-a", "android.intent.action.CLOSE_SYSTEM_DIALOGS"]
-        })
+        driver.execute_script("mobile: shell", {"command": "pm", "args": ["clear", pkg]})
+    except Exception as e:
+        print(f"[WARN] pm clear {pkg}: {e}")
+    try:
+        driver.terminate_app(pkg)
     except Exception:
         pass
 
-    # Espera a que la UI inicial esté lista
+    _start_or_activate(driver, pkg, activity)
+    _broadcast_close_system_dialogs(driver)
+    handle_anr_popup(driver)
     esperar_inicio_app(driver, timeout=timeout)
 
-
-# --------------------------------------------------------------------
-# Hooks Behave
-# --------------------------------------------------------------------
+# ------------------ hooks Behave ------------------
 
 def before_all(context):
     print("\n=== [SETUP GLOBAL] ===")
@@ -141,19 +194,12 @@ def before_all(context):
         context.configs = load_config(env)
         print(f"[INFO] Entorno de pruebas: {env}")
 
-        # Timeout de espera explícita centralizado (ajustable por ENV)
         context.DEFAULT_WAIT = int(os.getenv("WAIT_UI_SEC", "45"))
 
-        # Una sola sesión para toda la suite
         context.driver = create_driver(context.configs)
-
-        # Implícita BAJA para no interferir con explícitas
         _set_implicit_wait(context.driver, 0.5)
-
-        # WebDriverWait global de conveniencia
         context.wait = WebDriverWait(context.driver, context.DEFAULT_WAIT)
 
-        # Mails / datos
         context.mock_sms_base_url = str(context.configs.get("MOCK_SMS_BASE_URL", os.getenv("MOCK_SMS_BASE_URL", "http://127.0.0.1:8081")))
         context.phone_old = str(context.configs.get("STAGING_PHONE_OLD", os.getenv("STAGING_PHONE_OLD", "+5491100000001")))
         context.phone_new = str(context.configs.get("STAGING_PHONE_NEW", os.getenv("STAGING_PHONE_NEW", "+5491100000002")))
@@ -168,7 +214,6 @@ def before_all(context):
         traceback.print_exc()
         raise
 
-
 def before_scenario(context, scenario):
     print(f"\n=== [SETUP ESCENARIO] {scenario.name} ===")
     try:
@@ -180,10 +225,8 @@ def before_scenario(context, scenario):
             _set_implicit_wait(context.driver, 0.5)
             context.wait = WebDriverWait(context.driver, context.DEFAULT_WAIT)
 
-        # Limpieza ligera entre escenarios (sin reinstalar) y relanzar foreground
         _reset_app_state(context.driver, app_package, app_activity, timeout=context.DEFAULT_WAIT)
 
-        # páginas/clientes por escenario
         from utils.mailtm_client import MailTmClient
         context.mail_client = MailTmClient(timeout=context.mail_tm_timeout)
         context.login_page = LoginPage(context.driver)
@@ -197,12 +240,10 @@ def before_scenario(context, scenario):
         traceback.print_exc()
         raise
 
-
 def after_scenario(context, scenario):
     print(f"=== [TEARDOWN ESCENARIO] {scenario.name} ({scenario.status}) ===")
-    # Mantener la sesión viva suele ser más estable en CI (emulador TCG).
+    # Mantener la sesión viva en CI suele ser más estable.
     pass
-
 
 def after_all(context):
     print("\n=== [TEARDOWN GLOBAL] ===")

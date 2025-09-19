@@ -220,6 +220,29 @@ jobs:
           adb -s "$dev" shell settings put global animator_duration_scale 0 || true
           adb -s "$dev" shell svc power stayon true || true
 
+      - name: "Watchdog: cerrar ANR de System UI si aparece"
+        shell: bash
+        run: |
+          set -eux
+          dev="${ANDROID_SERIAL:-$(adb devices | awk '/emulator-/{print $1; exit}')}"
+          [ -n "$dev" ] || exit 0
+          nohup bash -c '
+            while true; do
+              # Detecta ANR del System UI
+              if adb -s '"$dev"' shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
+                adb -s '"$dev"' shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
+                # Intenta seleccionar "Wait" con dpad+enter (derecha + enter) unas veces
+                for i in 1 2 3; do
+                  adb -s '"$dev"' shell input keyevent 22 || true
+                  adb -s '"$dev"' shell input keyevent 66 || true
+                  sleep 1
+                done
+              fi
+              sleep 2
+            done
+          ' > watchdog.log 2>&1 &
+
+
       - name: Instalar y arrancar Appium
         if: env.USE_APPIUM == 'true'
         shell: bash
