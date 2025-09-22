@@ -96,7 +96,7 @@ jobs:
           rclone version
           rclone listremotes
 
-      - name: Smoke test: acceso a Drive y descarga de APK
+      - name: "Smoke test: acceso a Drive y descarga de APK"
         run: |
           set -eux
           rclone ls "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}"
