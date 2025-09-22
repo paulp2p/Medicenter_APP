@@ -1,4 +1,4 @@
-name: Android Behave Tests (APK desde Drive, Ubuntu sin Play Store)
+name: Android Behave Tests (Ubuntu AOSP, ANR-hardened)
 
 on:
   workflow_dispatch:
@@ -37,9 +37,14 @@ env:
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
-  # Driver factory hints
+  # Idioma (anchors en inglés)
+  LANGUAGE: "en"
+  LOCALE: "US"
+
+  # Esperas Appium relajadas para hosted
   APP_WAIT_DURATION: "180000"
-  APP_WAIT_ACTIVITY: "com.siltium.medicenter.*"
+  APP_WAIT_ACTIVITY: ".*"
+  STRICT_APP_WAIT: "false"
 
 jobs:
   android-behave:
@@ -83,7 +88,7 @@ jobs:
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y rclone netcat-openbsd curl
+          sudo apt-get install -y rclone netcat-openbsd curl unzip
 
       - name: Configurar rclone (desde secreto base64)
         env:
@@ -96,8 +101,7 @@ jobs:
           PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
           printf '%s' "$CLEAN" | base64 -d > ~/.config/rclone/rclone.conf
-          rclone version
-          rclone listremotes
+          rclone version && rclone listremotes
 
       - name: "Smoke test: descarga de APK"
         run: |
@@ -136,22 +140,19 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-          # IMPORTANTE: imagen AOSP SIN Google APIs
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
               "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
               "build-tools;30.0.3" \
               "system-images;android-${API_LEVEL};default;x86_64" ) || true
 
-          # Symlink opcional
           sudo mkdir -p /usr/local/lib/android
           [ -e /usr/local/lib/android/sdk ] || sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
 
-          ls -la "$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64" || exit 1
           adb version
           emulator -version
 
-      - name: Crear AVD (AOSP default; sin GMS)
+      - name: Crear AVD (AOSP default; perfil liviano para TCG)
         run: |
           set -eux
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
@@ -159,17 +160,27 @@ jobs:
           yes "no" | avdmanager create avd \
             -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};default;x86_64" \
             -d "$DEVICE_PROFILE" --force
+
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
-            echo "hw.cpu.ncore=3"
-            echo "hw.ramSize=3072"
-            echo "vm.heapSize=512"
             echo "tag.id=default"
             echo "abi.type=x86_64"
             echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64"
-            echo "hw.gpu.mode=swiftshader_indirect"
-            echo "hw.gpu.enabled=yes"
+
+            # TCG-friendly
+            echo "hw.cpu.ncore=1"
+            echo "hw.ramSize=2048"
+            echo "vm.heapSize=384"
             echo "disk.dataPartition.size=4096M"
+
+            # GPU software
+            echo "hw.gpu.enabled=yes"
+            echo "hw.gpu.mode=swiftshader_indirect"
+
+            # Pantalla 720p
+            echo "hw.lcd.width=720"
+            echo "hw.lcd.height=1280"
+            echo "hw.lcd.density=280"
           } >> "$AVD_CFG"
 
       - name: Iniciar emulador (headless, sin KVM) y gate robusto
@@ -180,7 +191,6 @@ jobs:
           export ADB_VENDOR_KEYS=
           : > emulator.log
 
-          # Hosted Ubuntu => sin KVM: -accel off + SwiftShader
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
             -accel off -no-metrics \
@@ -200,14 +210,38 @@ jobs:
 
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
-      - name: "Watchdog: cerrar diálogos del sistema (no bloqueante)"
+      - name: Cool-down post boot (evita ANR inicial)
+        run: |
+          set -eux
+          dev="emulator-5554"
+          sleep 12
+          adb -s "$dev" shell am start -W -n com.android.settings/.Settings || true
+          sleep 2
+          adb -s "$dev" shell input keyevent 3 || true
+          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+
+      - name: Watchdog ANR SystemUI (autoresolver)
         run: |
           set -eux
           dev="emulator-5554"
           nohup bash -c '
             while true; do
-              adb -s '"$dev"' shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" >/dev/null 2>&1 || true
-              sleep 3
+              if adb -s '"$dev"' shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
+                adb -s '"$dev"' shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
+                for i in 1 2 3; do
+                  adb -s '"$dev"' shell input keyevent 22 || true
+                  adb -s '"$dev"' shell input keyevent 66 || true
+                  sleep 1
+                done
+              else
+                # Heurística: popup "isn't responding"
+                adb -s '"$dev"' shell "uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1" || true
+                if adb -s '"$dev"' shell "grep -qi 'isn.t responding' /sdcard/uidump.xml" >/dev/null 2>&1; then
+                  adb -s '"$dev"' shell input tap 520 920 || true
+                fi
+              fi
+              adb -s '"$dev"' shell cmd statusbar collapse || true
+              sleep 2
             done
           ' > watchdog.log 2>&1 &
 
@@ -228,8 +262,6 @@ jobs:
           adb -s $dev shell settings put global transition_animation_scale 0 || true
           adb -s $dev shell settings put global animator_duration_scale 0 || true
           adb -s $dev shell svc power stayon true || true
-
-          # Evitar overlays que tapen el anchor
           adb -s $dev shell settings put global heads_up_notifications_enabled 0 || true
           adb -s $dev shell cmd statusbar collapse || true
 
@@ -260,7 +292,6 @@ jobs:
           set -euxo pipefail
           dev="emulator-5554"
 
-          # Higiene y uninstall previa
           adb -s "$dev" shell settings put global verifier_verify_adb_installs 0 || true
           if [ -n "${APP_PACKAGE:-}" ]; then
             adb -s "$dev" shell "am force-stop ${APP_PACKAGE}" || true
@@ -268,7 +299,6 @@ jobs:
             adb -s "$dev" uninstall "${APP_PACKAGE}" || true
           fi
 
-          # Install normal y fallback por "package session"
           if ! adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}" | tee adb-install.log; then
             echo "Instalación streamed falló; usando package session…"
             adb -s "$dev" push -p "${APK_LOCAL_NAME}" /data/local/tmp/app-under-test.apk
@@ -278,28 +308,18 @@ jobs:
             adb -s "$dev" shell "cmd package install-commit ${sess}"
           fi
 
-          # Colapsar notificaciones antes de tests
           adb -s "$dev" shell cmd statusbar collapse || true
 
-      - name: (Opcional) Preinstalar io.appium.settings
-        run: |
-          set -eux
-          dev="emulator-5554"
-          SETTINGS_APK="$HOME/.appium/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
-          test -f "$SETTINGS_APK" && adb -s "$dev" install -r "$SETTINGS_APK" || true
       - name: Prelanzar app y cerrar diálogos del sistema
         run: |
           set -eux
           dev="emulator-5554"
-          # Cerrar posibles diálogos del sistema
-          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
-          # Lanzar la app a mano (si falla, reintenta una vez)
-          adb -s "$dev" shell am start -W -n "com.siltium.medicenter/com.siltium.medicenter.MainActivity" || true
+          # Lanzar por launcher (neutral a alias/splash)
+          adb -s "$dev" shell monkey -p com.siltium.medicenter -c android.intent.category.LAUNCHER 1 || true
           sleep 3
           adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
-          # Log de qué actividad está arriba (útil si vuelve a fallar)
+          # Dump de actividad actual (para diagnóstico)
           adb -s "$dev" shell dumpsys activity activities | head -n 120 || true
-          adb -s emulator-5554 shell dumpsys activity activities | grep -E "topResumedActivity|mResumedActivity|mFocusedApp" || true
 
       - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'
@@ -329,16 +349,13 @@ jobs:
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
 
-      - name: Capturar logcat para diagnóstico (no bloqueante)
+      - name: Capturar logcat (10 min) para diagnóstico
         if: always()
         run: |
           set -euxo pipefail
           dev="emulator-5554"
           : > logcat.txt
-          timeout 60s adb -s "$dev" logcat -d -b all -v threadtime -T 10m >> logcat.txt || {
-            echo "[logcat] timeout/err; intento corto -t 2000" | tee -a logcat.txt
-            timeout 20s adb -s "$dev" logcat -d -t 2000 -v threadtime >> logcat.txt || true
-          }
+          timeout 60s adb -s "$dev" logcat -d -b all -v threadtime -T 10m >> logcat.txt || true
 
       - name: Subir artefactos (Allure, logs)
         if: always()
