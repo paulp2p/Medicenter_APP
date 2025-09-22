@@ -224,26 +224,28 @@ jobs:
         run: |
           set -eux
           dev="emulator-5554"
-          nohup bash -c '
-            while true; do
-              if adb -s '"$dev"' shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
-                adb -s '"$dev"' shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
-                for i in 1 2 3; do
-                  adb -s '"$dev"' shell input keyevent 22 || true
-                  adb -s '"$dev"' shell input keyevent 66 || true
-                  sleep 1
-                done
-              else
-                # Heurística: popup "isn't responding"
-                adb -s '"$dev"' shell "uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1" || true
-                if adb -s '"$dev"' shell "grep -qi 'isn.t responding' /sdcard/uidump.xml" >/dev/null 2>&1; then
-                  adb -s '"$dev"' shell input tap 520 920 || true
-                fi
+          nohup bash > watchdog.log 2>&1 <<EOF &
+          set -e
+          while true; do
+            if adb -s "$dev" shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
+              adb -s "$dev" shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
+              for i in 1 2 3; do
+                adb -s "$dev" shell input keyevent 22 || true
+                adb -s "$dev" shell input keyevent 66 || true
+                sleep 1
+              done
+            else
+              # Heurística: popup "isn't responding"
+              adb -s "$dev" shell "uiautomator dump /sdcard/uidump.xml" >/dev/null 2>&1 || true
+              if adb -s "$dev" shell "grep -qi \"isn.t responding\" /sdcard/uidump.xml" >/dev/null 2>&1; then
+                adb -s "$dev" shell input tap 520 920 || true
               fi
-              adb -s '"$dev"' shell cmd statusbar collapse || true
-              sleep 2
-            done
-          ' > watchdog.log 2>&1 &
+            fi
+            adb -s "$dev" shell cmd statusbar collapse || true
+            sleep 2
+          done
+          EOF
+
 
       - name: Desbloquear, desactivar animaciones y silenciar notificaciones
         run: |
