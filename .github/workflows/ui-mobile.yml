@@ -287,6 +287,19 @@ jobs:
           dev="emulator-5554"
           SETTINGS_APK="$HOME/.appium/node_modules/appium-uiautomator2-driver/node_modules/io.appium.settings/apks/settings_apk-debug.apk"
           test -f "$SETTINGS_APK" && adb -s "$dev" install -r "$SETTINGS_APK" || true
+      - name: Prelanzar app y cerrar diálogos del sistema
+        run: |
+          set -eux
+          dev="emulator-5554"
+          # Cerrar posibles diálogos del sistema
+          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+          # Lanzar la app a mano (si falla, reintenta una vez)
+          adb -s "$dev" shell am start -W -n "com.siltium.medicenter/com.siltium.medicenter.MainActivity" || true
+          sleep 3
+          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+          # Log de qué actividad está arriba (útil si vuelve a fallar)
+          adb -s "$dev" shell dumpsys activity activities | head -n 120 || true
+          adb -s emulator-5554 shell dumpsys activity activities | grep -E "topResumedActivity|mResumedActivity|mFocusedApp" || true
 
       - name: Ejecutar tests (Behave)
         if: env.USE_APPIUM == 'true'

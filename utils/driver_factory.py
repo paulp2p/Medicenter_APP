@@ -23,7 +23,7 @@ def create_driver(config: dict):
     options.set_capability("platformName", config.get("PLATFORM_NAME", "Android"))
     options.set_capability("appium:automationName", config.get("AUTOMATION_NAME", "UiAutomator2"))
 
-    # Dirigimos al emulador detectado por el workflow
+    # Device / UDID
     udid = config.get("UDID", os.getenv("UDID"))
     if udid:
         options.set_capability("appium:udid", udid)
@@ -34,22 +34,22 @@ def create_driver(config: dict):
     if config.get("PLATFORM_VERSION") or os.getenv("PLATFORM_VERSION"):
         options.set_capability("appium:platformVersion", config.get("PLATFORM_VERSION", os.getenv("PLATFORM_VERSION")))
 
-    # Perfil según KVM (HAS_KVM=1 lo setea el workflow si /dev/kvm está ok)
+    # Perfil KVM vs hosted
     HAS_KVM = _bool(os.getenv("HAS_KVM"), False)
 
-    # Timeouts base (más cortos con KVM)
-    adb_exec_timeout_ms = 180_000 if HAS_KVM else int(os.getenv("ADB_EXEC_TIMEOUT", "600000"))
+    # Timeouts base (más cortos con KVM; más largos en hosted)
+    adb_exec_timeout_ms     = 180_000 if HAS_KVM else int(os.getenv("ADB_EXEC_TIMEOUT", "600000"))
     uia2_install_timeout_ms = 120_000 if HAS_KVM else int(os.getenv("UIA2_INSTALL_TIMEOUT", "300000"))
     uia2_launch_timeout_ms  = 120_000 if HAS_KVM else int(os.getenv("UIA2_LAUNCH_TIMEOUT", "300000"))
     android_install_timeout = 240_000 if HAS_KVM else int(os.getenv("ANDROID_INSTALL_TIMEOUT", "600000"))
-    app_wait_duration_ms    = 60_000  if HAS_KVM else int(os.getenv("APP_WAIT_DURATION", "120000"))
+    app_wait_duration_ms    = int(os.getenv("APP_WAIT_DURATION", "60000" if HAS_KVM else "180000"))
 
     # Calidad de vida en CI
     options.set_capability("appium:autoGrantPermissions", True)
     options.set_capability("appium:disableWindowAnimation", True)
     options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
     options.set_capability("appium:skipDeviceInitialization", True)
-    options.set_capability("appium:disableAndroidWatchers", True)  # reduce overhead de watchers
+    options.set_capability("appium:disableAndroidWatchers", True)
 
     # Timeouts
     options.set_capability("appium:adbExecTimeout", adb_exec_timeout_ms)
@@ -58,21 +58,28 @@ def create_driver(config: dict):
     options.set_capability("appium:androidInstallTimeout", android_install_timeout)
 
     # Launch/wait de la app
-    options.set_capability("appium:appWaitForLaunch", True)
+    options.set_capability("appium:appWaitForLaunch", False)  # <- evita el "never started" con cambios rápidos de activity
     options.set_capability("appium:appWaitDuration", app_wait_duration_ms)
 
-    # appWaitActivity más específico si está APP_ACTIVITY; sino, fallback regex
+    # appWaitActivity: prioridad ENV -> strict -> libre
     pkg_env = os.getenv("APP_PACKAGE", config.get("APP_PACKAGE"))
     act_env = os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY"))
-    if act_env:
-        # Regex permite pequeñas variaciones (por ejemplo .MainActivity vs .MainActivityAlias)
+    strict_wait = _bool(os.getenv("STRICT_APP_WAIT"), False)
+
+    app_wait_activity_env = os.getenv("APP_WAIT_ACTIVITY", config.get("APP_WAIT_ACTIVITY"))
+    if app_wait_activity_env:
+        options.set_capability("appium:appWaitActivity", app_wait_activity_env)
+    elif strict_wait and act_env:
         options.set_capability("appium:appWaitActivity", f"{act_env}.*")
     else:
-        options.set_capability("appium:appWaitActivity", os.getenv("APP_WAIT_ACTIVITY", config.get("APP_WAIT_ACTIVITY", ".*")))
+        options.set_capability("appium:appWaitActivity", ".*")
 
+    # Reset/instalación (preferimos que Appium NO fuerce reinstal; ya lo maneja el workflow)
+    options.set_capability("appium:noReset", _bool(os.getenv("NO_RESET", "true"), True))
+    options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "false"), False))
     options.set_capability("appium:dontStopAppOnReset", False)
 
-    # Idioma/locale (ajústalo si tus tests dependen de ES/AR)
+    # Idioma/locale
     options.set_capability("appium:language", os.getenv("LANGUAGE", config.get("LANGUAGE", "en")))
     options.set_capability("appium:locale", os.getenv("LOCALE", config.get("LOCALE", "US")))
 
@@ -123,6 +130,7 @@ def create_driver(config: dict):
     if udid:
         print(f"[driver_factory] UDID/serial: {udid}")
     print(f"[driver_factory] HAS_KVM={HAS_KVM}")
+    print(f"[driver_factory] appWaitActivity={options.capabilities.get('appium:appWaitActivity')}, appWaitDuration={app_wait_duration_ms}ms, noReset={options.capabilities.get('appium:noReset')}")
 
     driver = webdriver.Remote(server_url, options=options)
 
@@ -133,6 +141,6 @@ def create_driver(config: dict):
             "actionAcknowledgmentTimeout": 500
         })
     except Exception as e:
-        print(f"[driver_factory] update_settings warning: {e}")
+            print(f"[driver_factory] update_settings warning: {e}")
 
     return driver
