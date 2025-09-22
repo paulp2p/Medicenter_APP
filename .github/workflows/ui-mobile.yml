@@ -1,4 +1,4 @@
-name: Android Behave Tests (APK desde Drive, emulador manual — ANR hardened)
+name: Android Behave Tests (APK desde Drive, Ubuntu sin Play Store)
 
 on:
   workflow_dispatch:
@@ -37,6 +37,10 @@ env:
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
+  # Driver factory hints
+  APP_WAIT_DURATION: "180000"
+  APP_WAIT_ACTIVITY: "com.siltium.medicenter.*"
+
 jobs:
   android-behave:
     runs-on: ubuntu-latest
@@ -56,7 +60,7 @@ jobs:
         if: env.USE_APPIUM == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "20"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -81,10 +85,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rclone netcat-openbsd curl
 
-      - name: Configurar rclone (desde secreto base64 robusto)
+      - name: Configurar rclone (desde secreto base64)
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
-        shell: bash
         run: |
           set -euo pipefail
           [ -n "${RCLONE_CONF_B64:-}" ] || { echo "Falta secrets.RCLONE_CONF_B64"; exit 1; }
@@ -133,7 +136,7 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-          # IMPORTANTE: Imagen AOSP SIN Google APIs
+          # IMPORTANTE: imagen AOSP SIN Google APIs
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
               "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
@@ -158,15 +161,16 @@ jobs:
             -d "$DEVICE_PROFILE" --force
           AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
           {
-            echo "hw.cpu.ncore=2"
-            echo "disk.dataPartition.size=2048M"
-            echo "abi.type=x86_64"
+            echo "hw.cpu.ncore=3"
+            echo "hw.ramSize=3072"
+            echo "vm.heapSize=512"
             echo "tag.id=default"
+            echo "abi.type=x86_64"
             echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64"
             echo "hw.gpu.mode=swiftshader_indirect"
             echo "hw.gpu.enabled=yes"
+            echo "disk.dataPartition.size=4096M"
           } >> "$AVD_CFG"
-          grep -E '(^image.sysdir.1|^abi.type|^tag.id)' "$AVD_CFG" || true
 
       - name: Iniciar emulador (headless, sin KVM) y gate robusto
         run: |
