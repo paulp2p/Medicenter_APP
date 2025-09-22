@@ -1,4 +1,4 @@
-name: Android Behave Tests (APK desde Drive, emulador manual - ANR hardened)
+name: Android Behave Tests (APK desde Drive, emulador manual — ANR hardened)
 
 on:
   workflow_dispatch:
@@ -96,7 +96,7 @@ jobs:
           rclone version
           rclone listremotes
 
-      - name: "Smoke test: acceso a Drive y descarga de APK"
+      - name: "Smoke test: descarga de APK"
         run: |
           set -eux
           rclone ls "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}"
@@ -133,14 +133,14 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 
-          # IMPORTANTE: imagen AOSP SIN Google APIs
+          # IMPORTANTE: Imagen AOSP SIN Google APIs
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
           ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
               "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
               "build-tools;30.0.3" \
               "system-images;android-${API_LEVEL};default;x86_64" ) || true
 
-          # Symlink opcional para tooling
+          # Symlink opcional
           sudo mkdir -p /usr/local/lib/android
           [ -e /usr/local/lib/android/sdk ] || sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
 
@@ -168,28 +168,25 @@ jobs:
           } >> "$AVD_CFG"
           grep -E '(^image.sysdir.1|^abi.type|^tag.id)' "$AVD_CFG" || true
 
-      - name: Iniciar emulador (headless, sin KVM) y estabilizar ADB
+      - name: Iniciar emulador (headless, sin KVM) y gate robusto
         run: |
           set -euxo pipefail
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
           export ANDROID_EMULATOR_USE_SYSTEM_LIBS=1
           export ADB_VENDOR_KEYS=
-          pkill -f "adb" || true
-          adb kill-server || true
-          adb start-server
-
           : > emulator.log
-          # Hosted Ubuntu => sin KVM: -accel off + swiftshader
+
+          # Hosted Ubuntu => sin KVM: -accel off + SwiftShader
           nohup emulator -avd "$AVD_NAME" \
             -no-window -no-boot-anim -no-snapshot \
             -accel off -no-metrics \
             -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
             -port 5554 -ports 5554,5555 > emulator.log 2>&1 &
 
-          # Esperar que adb vea el dispositivo
+          adb start-server
           timeout 180s bash -c 'until adb -s emulator-5554 get-state 2>/dev/null; do sleep 2; done'
 
-          # Gate robusto: framework + package manager respondiendo
+          # Gate robusto: framework + PackageManager respondiendo
           deadline=$((SECONDS+600))
           until adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q 1 && \
                 adb -s emulator-5554 shell "cmd package list packages >/dev/null 2>&1"; do
@@ -199,7 +196,7 @@ jobs:
 
           echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
 
-      - name: Watchdog ANR (no bloqueante)
+      - name: "Watchdog: cerrar diálogos del sistema (no bloqueante)"
         run: |
           set -eux
           dev="emulator-5554"
@@ -218,11 +215,17 @@ jobs:
           adb -s $dev shell wm dismiss-keyguard || true
           adb -s $dev shell input keyevent 82 || true
           adb -s $dev shell input keyevent 3  || true
+
+          # Asegurar servicios base primero
+          for i in $(seq 1 60); do adb -s $dev shell 'pm path android' >/dev/null 2>&1 && break || sleep 2; done
+          for i in $(seq 1 60); do adb -s $dev shell 'settings list system' >/dev/null 2>&1 && break || sleep 2; done
+
           adb -s $dev shell settings put global window_animation_scale 0 || true
           adb -s $dev shell settings put global transition_animation_scale 0 || true
           adb -s $dev shell settings put global animator_duration_scale 0 || true
           adb -s $dev shell svc power stayon true || true
-          # Evitar overlays que tapen el anchor:
+
+          # Evitar overlays que tapen el anchor
           adb -s $dev shell settings put global heads_up_notifications_enabled 0 || true
           adb -s $dev shell cmd statusbar collapse || true
 
@@ -255,10 +258,14 @@ jobs:
 
           # Higiene y uninstall previa
           adb -s "$dev" shell settings put global verifier_verify_adb_installs 0 || true
-          [ -n "${APP_PACKAGE:-}" ] && adb -s "$dev" uninstall "${APP_PACKAGE}" || true
+          if [ -n "${APP_PACKAGE:-}" ]; then
+            adb -s "$dev" shell "am force-stop ${APP_PACKAGE}" || true
+            adb -s "$dev" shell "pm clear ${APP_PACKAGE}" || true
+            adb -s "$dev" uninstall "${APP_PACKAGE}" || true
+          fi
 
           # Install normal y fallback por "package session"
-          if ! adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}"; then
+          if ! adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}" | tee adb-install.log; then
             echo "Instalación streamed falló; usando package session…"
             adb -s "$dev" push -p "${APK_LOCAL_NAME}" /data/local/tmp/app-under-test.apk
             sess="$(adb -s "$dev" shell 'cmd package install-create -r -d -t' | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)"
@@ -267,7 +274,7 @@ jobs:
             adb -s "$dev" shell "cmd package install-commit ${sess}"
           fi
 
-          # Colapsar cualquier notificación antes de tests
+          # Colapsar notificaciones antes de tests
           adb -s "$dev" shell cmd statusbar collapse || true
 
       - name: (Opcional) Preinstalar io.appium.settings
@@ -309,10 +316,11 @@ jobs:
         if: always()
         run: |
           set -euxo pipefail
+          dev="emulator-5554"
           : > logcat.txt
-          timeout 60s adb -s emulator-5554 logcat -d -b all -v threadtime -T 10m >> logcat.txt || {
+          timeout 60s adb -s "$dev" logcat -d -b all -v threadtime -T 10m >> logcat.txt || {
             echo "[logcat] timeout/err; intento corto -t 2000" | tee -a logcat.txt
-            timeout 20s adb -s emulator-5554 logcat -d -t 2000 -v threadtime >> logcat.txt || true
+            timeout 20s adb -s "$dev" logcat -d -t 2000 -v threadtime >> logcat.txt || true
           }
 
       - name: Subir artefactos (Allure, logs)
