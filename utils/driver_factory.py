@@ -1,7 +1,8 @@
 import os
+import re
 from appium import webdriver
 
-# Appium Python client v3+ / v2.x
+# Compatibilidad Appium Python client v3/v2
 try:
     from appium.options.android import UiAutomator2Options  # v3+
 except Exception:
@@ -22,7 +23,7 @@ def _csv_env(name: str):
 
 
 def create_driver(config: dict):
-    # ===== Hub / Server: AHORA ENV -> CONFIG -> DEFAULT =====
+    # ===== Hub / Server (ENV -> CONFIG -> DEFAULT) =====
     server_url = os.getenv("APPIUM_SERVER_URL", config.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723"))
     is_sauce = "saucelabs.com" in server_url
 
@@ -40,34 +41,34 @@ def create_driver(config: dict):
     else:
         options.set_capability("appium:deviceName", os.getenv("DEVICE_NAME", config.get("DEVICE_NAME", "Android Emulator")))
 
-    # platformVersion (ENV primero)
+    # platformVersion
     if os.getenv("PLATFORM_VERSION") or config.get("PLATFORM_VERSION"):
         options.set_capability("appium:platformVersion", os.getenv("PLATFORM_VERSION", config.get("PLATFORM_VERSION")))
 
-    # Perfil KVM vs hosted (sólo para local/hosted)
+    # Perfil KVM vs hosted (para emulador local)
     HAS_KVM = _bool(os.getenv("HAS_KVM"), False)
 
-    # Timeouts (más cortos con KVM; más largos en hosted)
+    # ===== Timeouts =====
     adb_exec_timeout_ms     = 180_000 if HAS_KVM else int(os.getenv("ADB_EXEC_TIMEOUT", "600000"))
     uia2_install_timeout_ms = 120_000 if HAS_KVM else int(os.getenv("UIA2_INSTALL_TIMEOUT", "300000"))
     uia2_launch_timeout_ms  = 120_000 if HAS_KVM else int(os.getenv("UIA2_LAUNCH_TIMEOUT", "300000"))
     android_install_timeout = 240_000 if HAS_KVM else int(os.getenv("ANDROID_INSTALL_TIMEOUT", "600000"))
     app_wait_duration_ms    = int(os.getenv("APP_WAIT_DURATION", "60000" if HAS_KVM else "180000"))
 
-    # Calidad de vida en CI
+    options.set_capability("appium:adbExecTimeout", adb_exec_timeout_ms)
+    options.set_capability("appium:uiautomator2ServerInstallTimeout", uia2_install_timeout_ms)
+    options.set_capability("appium:uiautomator2ServerLaunchTimeout", uia2_launch_timeout_ms)
+    options.set_capability("appium:androidInstallTimeout", android_install_timeout)
+
+    # ===== Calidad de vida en CI =====
     options.set_capability("appium:autoGrantPermissions", True)
     options.set_capability("appium:disableWindowAnimation", True)
     options.set_capability("appium:newCommandTimeout", int(os.getenv("NEW_COMMAND_TIMEOUT", config.get("NEW_COMMAND_TIMEOUT", 180))))
     options.set_capability("appium:skipDeviceInitialization", True)
     options.set_capability("appium:disableAndroidWatchers", True)
 
-    # Timeouts
-    options.set_capability("appium:adbExecTimeout", adb_exec_timeout_ms)
-    options.set_capability("appium:uiautomator2ServerInstallTimeout", uia2_install_timeout_ms)
-    options.set_capability("appium:uiautomator2ServerLaunchTimeout", uia2_launch_timeout_ms)
-    options.set_capability("appium:androidInstallTimeout", android_install_timeout)
-
-    # Launch/wait de la app (relajado para evitar "never started")
+    # ===== Esperas de app =====
+    # Por defecto relajado; en Sauce se endurece más abajo
     options.set_capability("appium:appWaitForLaunch", False)
     options.set_capability("appium:appWaitDuration", app_wait_duration_ms)
 
@@ -75,6 +76,7 @@ def create_driver(config: dict):
     pkg_env = os.getenv("APP_PACKAGE", config.get("APP_PACKAGE"))
     act_env = os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY"))
     strict_wait = _bool(os.getenv("STRICT_APP_WAIT"), False)
+
     app_wait_activity_env = os.getenv("APP_WAIT_ACTIVITY", config.get("APP_WAIT_ACTIVITY"))
     if app_wait_activity_env:
         options.set_capability("appium:appWaitActivity", app_wait_activity_env)
@@ -83,27 +85,30 @@ def create_driver(config: dict):
     else:
         options.set_capability("appium:appWaitActivity", ".*")
 
-    # Reset/instalación (Appium NO fuerza reinstalar; lo maneja el workflow)
+    # ===== Reset/instalación =====
     options.set_capability("appium:noReset", _bool(os.getenv("NO_RESET", "true"), True))
     options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "false"), False))
     options.set_capability("appium:dontStopAppOnReset", False)
 
-    # Idioma/locale
+    # ===== Idioma/locale =====
     options.set_capability("appium:language", os.getenv("LANGUAGE", config.get("LANGUAGE", "en")))
     options.set_capability("appium:locale", os.getenv("LOCALE", config.get("LOCALE", "US")))
 
-    # Útiles para debug y compatibilidad
+    # ===== Compatibilidad =====
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
     # ===== APP: ENV primero; soporta IDs/URLs de cloud =====
     app_path = os.getenv("APP") or config.get("APP")
     if app_path:
-        # Si es id/url de cloud, no tocamos rutas locales
-        if app_path.startswith(("storage:", "sauce-storage:", "bs://")):
+        # Si viene un UUID "pelado" (id de Sauce), anteponer storage:
+        if re.fullmatch(r"[0-9a-fA-F-]{36}", app_path):
+            app_path = f"storage:{app_path}"
+
+        if app_path.startswith(("storage:", "sauce-storage:", "bs://", "http://", "https://")):
             options.set_capability("appium:app", app_path)
         else:
-            # Normalizar path Windows->Linux en CI
+            # Path local: normalizar Windows->Linux en CI
             if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
                 win_basename = os.path.basename(app_path.replace("\\", "/"))
                 candidate = os.path.abspath(win_basename)
@@ -134,11 +139,11 @@ def create_driver(config: dict):
         if act_env:
             options.set_capability("appium:appActivity", act_env)
 
-    # System port (paralelismo local)
+    # Paralelismo local
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 
-    # ===== Sauce Labs: metadata opcional (dashboard) =====
+    # ===== Sauce Labs: metadata + endurecer waits/instalación =====
     if is_sauce:
         sauce_opts = {
             "build": os.getenv("SAUCE_BUILD", f"Build #{os.getenv('GITHUB_RUN_NUMBER', 'local')}"),
@@ -153,6 +158,19 @@ def create_driver(config: dict):
             sauce_opts["deviceOrientation"] = os.getenv("DEVICE_ORIENTATION")
         options.set_capability("sauce:options", sauce_opts)
 
+        # En cloud queremos estado limpio + instalación forzada + esperar el launch real
+        options.set_capability("appium:noReset", False)
+        options.set_capability("appium:enforceAppInstall", True)
+        options.set_capability("appium:appWaitForLaunch", True)
+
+        # Si no se pasó un appWaitActivity explícito, espera por tu paquete/actividad
+        if not app_wait_activity_env:
+            if pkg_env:
+                options.set_capability("appium:appWaitPackage", pkg_env)
+                options.set_capability("appium:appWaitActivity", f"{pkg_env}.*")
+            elif act_env:
+                options.set_capability("appium:appWaitActivity", f"{act_env}.*")
+
     # ===== Logs de arranque =====
     print(f"[driver_factory] Appium server: {server_url}")
     print(f"[driver_factory] Using app: {app_path or (pkg_env or '<no-package>') + '/' + (act_env or '')}")
@@ -160,7 +178,11 @@ def create_driver(config: dict):
         print(f"[driver_factory] UDID/serial: {udid}")
     print(f"[driver_factory] HAS_KVM={HAS_KVM}")
     print(f"[driver_factory] appWaitActivity={options.capabilities.get('appium:appWaitActivity')}, "
-          f"appWaitDuration={app_wait_duration_ms}ms, noReset={options.capabilities.get('appium:noReset')}")
+          f"appWaitPackage={options.capabilities.get('appium:appWaitPackage')}, "
+          f"appWaitForLaunch={options.capabilities.get('appium:appWaitForLaunch')}, "
+          f"appWaitDuration={app_wait_duration_ms}ms, "
+          f"noReset={options.capabilities.get('appium:noReset')}, "
+          f"enforceAppInstall={options.capabilities.get('appium:enforceAppInstall')}")
     if is_sauce:
         print(f"[driver_factory] sauce:options = {options.capabilities.get('sauce:options')}")
 

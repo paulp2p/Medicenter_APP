@@ -109,18 +109,34 @@ jobs:
       # Ejecutar Behave contra el hub de Sauce (US West)
       - name: Ejecutar tests (Behave → Sauce)
         env:
+          # Hub Sauce US West (no levantes Appium local)
           APPIUM_SERVER_URL: https://${{ secrets.SAUCE_USERNAME }}:${{ secrets.SAUCE_ACCESS_KEY }}@ondemand.us-west-1.saucelabs.com/wd/hub
+
+          # Caps base
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          DEVICE_NAME: "Android GoogleAPI Emulator"
+          DEVICE_NAME: "Android GoogleAPI Emulator"   # emulador gestionado por Sauce
           PLATFORM_VERSION: "12.0"
+
+          # App desde el paso de upload a Storage
           APP: ${{ env.APP_URL }}
-          APP_PACKAGE: ${{ env.APP_PACKAGE }}
-          APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
-          LANGUAGE: ${{ env.LANGUAGE }}
-          LOCALE: ${{ env.LOCALE }}
-          APP_WAIT_ACTIVITY: ${{ env.APP_WAIT_ACTIVITY }}
-          APP_WAIT_DURATION: ${{ env.APP_WAIT_DURATION }}
+
+          # Tu app (pkg/activity) y waits coherentes para cloud
+          APP_PACKAGE: "com.siltium.medicenter"
+          APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
+          APP_WAIT_ACTIVITY: "com.siltium.medicenter.*"
+          APP_WAIT_DURATION: "120000"
+          STRICT_APP_WAIT: "true"
+
+          # Forzar instalación/launch en cloud
+          NO_RESET: "false"
+          ENFORCE_APP_INSTALL: "true"
+
+          # Idioma/locale (tus anclas están en inglés)
+          LANGUAGE: "en"
+          LOCALE: "US"
+
+          # Metadata para el dashboard de Sauce
           SAUCE_BUILD: "Build #${{ github.run_number }}"
           SAUCE_NAME:  "Behave - ${{ github.ref_name }}"
           SAUCE_TAGS:  "CI,Android,Behave"
@@ -128,8 +144,15 @@ jobs:
           set -eux
           echo "APPIUM_SERVER_URL=$APPIUM_SERVER_URL"
           echo "APP=$APP"
+          echo "DEVICE=$DEVICE_NAME  PLATFORM=$PLATFORM_NAME $PLATFORM_VERSION"
+          echo "PKG/ACT=$APP_PACKAGE / $APP_ACTIVITY"
           mkdir -p reports/allure-results
-          behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+          if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
+            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
+          else
+            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+          fi
+
 
       # Subir reportes Allure
       - name: Subir artefactos (Allure)
