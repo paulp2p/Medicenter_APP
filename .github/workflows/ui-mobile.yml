@@ -85,60 +85,58 @@ jobs:
           rclone copyto "gdrive:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
-      - name: Subir APK a Sauce Storage (US West)
+      - name: Subir APK a BrowserStack (App Automate)
         env:
-          SAUCE_USERNAME: ${{ secrets.SAUCE_USERNAME }}
-          SAUCE_ACCESS_KEY: ${{ secrets.SAUCE_ACCESS_KEY }}
+          BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+          BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
         run: |
           set -eux
-          RESP=$(curl -s -u "$SAUCE_USERNAME:$SAUCE_ACCESS_KEY" \
-                -X POST "https://api.us-west-1.saucelabs.com/v1/storage/upload" \
-                -F "payload=@${APK_LOCAL_NAME}" \
-                -F "name=${APK_LOCAL_NAME}" \
-                -F "overwrite=true")
-          echo "$RESP" | jq .
-
-          ID=$(echo "$RESP" | jq -r '.item.id // .id // empty')
-          if [ -n "$ID" ]; then
-            APP_URL="storage:${ID}"                       # <<----- CLAVE
-          else
-            APP_URL="storage:filename=${APK_LOCAL_NAME}"  # fallback por filename
-          fi
+          test -f "${APK_LOCAL_NAME}"
+          RESP=$(curl -s -u "$BROWSERSTACK_USERNAME:$BROWSERSTACK_ACCESS_KEY" \
+                -X POST "https://api-cloud.browserstack.com/app-automate/upload" \
+                -F "file=@${APK_LOCAL_NAME}")
+          echo "$RESP"
+          APP_URL=$(echo "$RESP" | python - << 'PY'
+          import sys, json
+          data=json.load(sys.stdin)
+          print(data.get("app_url",""))
+          PY
+          )
+          [ -n "$APP_URL" ] || { echo "No obtuvimos app_url"; exit 1; }
           echo "APP_URL=$APP_URL" >> $GITHUB_ENV
 
-      # Ejecutar Behave contra el hub de Sauce (US West)
-      - name: Ejecutar tests (Behave → Sauce)
+      - name: Ejecutar tests (Behave → BrowserStack)
         env:
-          # Hub Sauce US West (no levantes Appium local)
-          APPIUM_SERVER_URL: https://${{ secrets.SAUCE_USERNAME }}:${{ secrets.SAUCE_ACCESS_KEY }}@ondemand.us-west-1.saucelabs.com/wd/hub
+          # Hub BrowserStack (no levantes Appium local)
+          APPIUM_SERVER_URL: https://${{ secrets.BROWSERSTACK_USERNAME }}:${{ secrets.BROWSERSTACK_ACCESS_KEY }}@hub-cloud.browserstack.com/wd/hub
 
           # Caps base
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          DEVICE_NAME: "Android GoogleAPI Emulator"   # emulador gestionado por Sauce
+          DEVICE_NAME: "Google Pixel 5"         # puedes usar otro del catálogo
           PLATFORM_VERSION: "12.0"
 
-          # App desde el paso de upload a Storage
-          APP: ${{ env.APP_URL }}
+          # App desde el upload a BS
+          APP: ${{ env.APP_URL }}               # ej: bs://abc123...
 
-          # Tu app (pkg/activity) y waits coherentes para cloud
+          # Tu app (pkg/activity) y waits coherentes en cloud
           APP_PACKAGE: "com.siltium.medicenter"
           APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
           APP_WAIT_ACTIVITY: "com.siltium.medicenter.*"
           APP_WAIT_DURATION: "120000"
           STRICT_APP_WAIT: "true"
 
-          # Forzar instalación/launch en cloud
+          # Forzar instalación/estado limpio en cloud
           NO_RESET: "false"
           ENFORCE_APP_INSTALL: "true"
 
-          # Idioma/locale (tus anclas están en inglés)
+          # Idioma/locale (tus anclas en inglés)
           LANGUAGE: "en"
           LOCALE: "US"
 
-          # Metadata para el dashboard de Sauce
-          SAUCE_BUILD: "Build #${{ github.run_number }}"
-          SAUCE_NAME:  "Behave - ${{ github.ref_name }}"
+          # Metadata (aparece en el dashboard de BS)
+          SAUCE_BUILD: "Build #${{ github.run_number }}"   # lo reutilizamos como “build”
+          SAUCE_NAME:  "Behave - ${{ github.ref_name }}"   # idem como “name”
           SAUCE_TAGS:  "CI,Android,Behave"
         run: |
           set -eux
@@ -152,7 +150,6 @@ jobs:
           else
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
-
 
       # Subir reportes Allure
       - name: Subir artefactos (Allure)
