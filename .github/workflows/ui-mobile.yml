@@ -92,15 +92,19 @@ jobs:
         run: |
           set -eux
           RESP=$(curl -s -u "$SAUCE_USERNAME:$SAUCE_ACCESS_KEY" \
-                 -X POST "https://api.us-west-1.saucelabs.com/v1/storage/upload" \
-                 -F "payload=@${APK_LOCAL_NAME}" \
-                 -F "name=${APK_LOCAL_NAME}" \
-                 -F "overwrite=true")
+                -X POST "https://api.us-west-1.saucelabs.com/v1/storage/upload" \
+                -F "payload=@${APK_LOCAL_NAME}" \
+                -F "name=${APK_LOCAL_NAME}" \
+                -F "overwrite=true")
           echo "$RESP" | jq .
-          APP_URL=$(echo "$RESP" | jq -r '.item.id // .id // empty')
-          [ -n "$APP_URL" ] || APP_URL="storage:filename=${APK_LOCAL_NAME}"
-          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
 
+          ID=$(echo "$RESP" | jq -r '.item.id // .id // empty')
+          if [ -n "$ID" ]; then
+            APP_URL="storage:${ID}"                       # <<----- CLAVE
+          else
+            APP_URL="storage:filename=${APK_LOCAL_NAME}"  # fallback por filename
+          fi
+          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
 
       # Ejecutar Behave contra el hub de Sauce (US West)
       - name: Ejecutar tests (Behave → Sauce)
@@ -126,7 +130,7 @@ jobs:
           echo "APP=$APP"
           mkdir -p reports/allure-results
           behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
-          
+
       # Subir reportes Allure
       - name: Subir artefactos (Allure)
         if: always()
