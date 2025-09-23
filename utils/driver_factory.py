@@ -25,7 +25,9 @@ def _csv_env(name: str):
 def create_driver(config: dict):
     # ===== Hub / Server (ENV -> CONFIG -> DEFAULT) =====
     server_url = os.getenv("APPIUM_SERVER_URL", config.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723"))
-    is_sauce = "saucelabs.com" in server_url
+    is_sauce  = "saucelabs.com" in server_url
+    is_bstack = "hub-cloud.browserstack.com" in server_url
+    is_cloud  = is_sauce or is_bstack
 
     options = UiAutomator2Options()
 
@@ -68,7 +70,7 @@ def create_driver(config: dict):
     options.set_capability("appium:disableAndroidWatchers", True)
 
     # ===== Esperas de app =====
-    # Por defecto relajado; en Sauce se endurece más abajo
+    # Por defecto relajado; en cloud se endurece más abajo
     options.set_capability("appium:appWaitForLaunch", False)
     options.set_capability("appium:appWaitDuration", app_wait_duration_ms)
 
@@ -143,7 +145,7 @@ def create_driver(config: dict):
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 
-    # ===== Sauce Labs: metadata + endurecer waits/instalación =====
+    # ===== Metadata cloud & endurecer waits/instalación =====
     if is_sauce:
         sauce_opts = {
             "build": os.getenv("SAUCE_BUILD", f"Build #{os.getenv('GITHUB_RUN_NUMBER', 'local')}"),
@@ -158,11 +160,26 @@ def create_driver(config: dict):
             sauce_opts["deviceOrientation"] = os.getenv("DEVICE_ORIENTATION")
         options.set_capability("sauce:options", sauce_opts)
 
-        # En cloud queremos estado limpio + instalación forzada + esperar el launch real
+    if is_bstack:
+        bstack_opts = {
+            "projectName": os.getenv("BSTACK_PROJECT", "Medicenter"),
+            "buildName":   os.getenv("BSTACK_BUILD",   f"CI #{os.getenv('GITHUB_RUN_NUMBER','local')}"),
+            "sessionName": os.getenv("BSTACK_SESSION", "Behave run"),
+            "debug": True,
+            "networkLogs": True,
+            "video": True,
+        }
+        if os.getenv("APPIUM_VERSION"):
+            bstack_opts["appiumVersion"] = os.getenv("APPIUM_VERSION")
+        if os.getenv("DEVICE_ORIENTATION"):
+            bstack_opts["deviceOrientation"] = os.getenv("DEVICE_ORIENTATION")
+        options.set_capability("bstack:options", bstack_opts)
+
+    # En cualquier cloud: estado limpio + instalación forzada + esperar el launch real
+    if is_cloud:
         options.set_capability("appium:noReset", False)
         options.set_capability("appium:enforceAppInstall", True)
         options.set_capability("appium:appWaitForLaunch", True)
-
         # Si no se pasó un appWaitActivity explícito, espera por tu paquete/actividad
         if not app_wait_activity_env:
             if pkg_env:
@@ -185,6 +202,8 @@ def create_driver(config: dict):
           f"enforceAppInstall={options.capabilities.get('appium:enforceAppInstall')}")
     if is_sauce:
         print(f"[driver_factory] sauce:options = {options.capabilities.get('sauce:options')}")
+    if is_bstack:
+        print(f"[driver_factory] bstack:options = {options.capabilities.get('bstack:options')}")
 
     # ===== Crear sesión =====
     driver = webdriver.Remote(server_url, options=options)

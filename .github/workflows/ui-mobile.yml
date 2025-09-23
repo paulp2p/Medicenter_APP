@@ -1,4 +1,4 @@
-name: Android Behave Tests (Sauce Labs US West)
+name: Android Behave Tests (BrowserStack)
 
 on:
   workflow_dispatch:
@@ -16,6 +16,7 @@ concurrency:
 
 env:
   APK_LOCAL_NAME: medicenter_app.apk
+
   # Si usas Drive:
   RCLONE_REMOTE: "gdrive"
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
@@ -24,7 +25,7 @@ env:
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
-  # Idioma (tus anclas en inglés)
+  # Idioma (anclas en inglés)
   LANGUAGE: "en"
   LOCALE: "US"
 
@@ -37,6 +38,7 @@ jobs:
   android-cloud:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,8 +57,8 @@ jobs:
           else
             pip install behave selenium appium-python-client allure-behave jq
           fi
-          
-      # Configurar rclone
+
+      # ---------- rclone (opcional si bajas desde Drive) ----------
       - name: Instalar utilidades (rclone, jq, curl)
         run: |
           set -eux
@@ -75,7 +77,6 @@ jobs:
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
           printf '%s' "$CLEAN" | base64 -d > "${HOME}/.config/rclone/rclone.conf"
           echo "== Remotos disponibles ==" && rclone listremotes
-          # Verifica que exista el remoto [gdrive]
           rclone config show gdrive: >/dev/null 2>&1 || { echo "No existe remoto [gdrive] en rclone.conf"; exit 1; }
 
       - name: Descargar APK (Drive)
@@ -85,6 +86,7 @@ jobs:
           rclone copyto "gdrive:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
+      # ---------- Upload a BrowserStack ----------
       - name: Subir APK a BrowserStack (App Automate)
         env:
           BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
@@ -92,19 +94,20 @@ jobs:
         run: |
           set -eux
           test -f "${APK_LOCAL_NAME}"
+
           RESP=$(curl -s -u "$BROWSERSTACK_USERNAME:$BROWSERSTACK_ACCESS_KEY" \
                 -X POST "https://api-cloud.browserstack.com/app-automate/upload" \
                 -F "file=@${APK_LOCAL_NAME}")
-          echo "$RESP"
-          APP_URL=$(echo "$RESP" | python - << 'PY'
-          import sys, json
-          data=json.load(sys.stdin)
-          print(data.get("app_url",""))
-          PY
-          )
-          [ -n "$APP_URL" ] || { echo "No obtuvimos app_url"; exit 1; }
-          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
 
+          echo "$RESP"
+
+          # Extraer bs://... de forma robusta
+          APP_URL=$(printf '%s' "$RESP" | jq -r '.app_url // empty')
+          [ -n "$APP_URL" ] || { echo "No se pudo obtener app_url de BrowserStack"; exit 1; }
+
+          echo "APP_URL=$APP_URL" >> "$GITHUB_ENV"
+
+      # ---------- Ejecutar tests en BrowserStack ----------
       - name: Ejecutar tests (Behave → BrowserStack)
         env:
           # Hub BrowserStack (no levantes Appium local)
@@ -113,11 +116,11 @@ jobs:
           # Caps base
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          DEVICE_NAME: "Google Pixel 5"         # puedes usar otro del catálogo
+          DEVICE_NAME: "Google Pixel 5"
           PLATFORM_VERSION: "12.0"
 
-          # App desde el upload a BS
-          APP: ${{ env.APP_URL }}               # ej: bs://abc123...
+          # App desde el upload a BS (bs://...)
+          APP: ${{ env.APP_URL }}
 
           # Tu app (pkg/activity) y waits coherentes en cloud
           APP_PACKAGE: "com.siltium.medicenter"
@@ -130,14 +133,14 @@ jobs:
           NO_RESET: "false"
           ENFORCE_APP_INSTALL: "true"
 
-          # Idioma/locale (tus anclas en inglés)
+          # Idioma/locale (anclas en inglés)
           LANGUAGE: "en"
           LOCALE: "US"
 
-          # Metadata (aparece en el dashboard de BS)
-          SAUCE_BUILD: "Build #${{ github.run_number }}"   # lo reutilizamos como “build”
-          SAUCE_NAME:  "Behave - ${{ github.ref_name }}"   # idem como “name”
-          SAUCE_TAGS:  "CI,Android,Behave"
+          # Metadata para dashboard BrowserStack
+          BSTACK_PROJECT: "Medicenter"
+          BSTACK_BUILD:   "CI #${{ github.run_number }}"
+          BSTACK_SESSION: "Behave - ${{ github.ref_name }}"
         run: |
           set -eux
           echo "APPIUM_SERVER_URL=$APPIUM_SERVER_URL"
@@ -151,7 +154,7 @@ jobs:
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
 
-      # Subir reportes Allure
+      # ---------- Allure ----------
       - name: Subir artefactos (Allure)
         if: always()
         uses: actions/upload-artifact@v4
