@@ -105,37 +105,29 @@ jobs:
       # Ejecutar Behave contra el hub de Sauce (US West)
       - name: Ejecutar tests (Behave → Sauce)
         env:
-          # Hub Sauce US West (no levantes Appium local)
           APPIUM_SERVER_URL: https://${{ secrets.SAUCE_USERNAME }}:${{ secrets.SAUCE_ACCESS_KEY }}@ondemand.us-west-1.saucelabs.com/wd/hub
-
-          # Caps estándar
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          DEVICE_NAME: "Android GoogleAPI Emulator"  # emulador gestionado por Sauce
+          DEVICE_NAME: "Android GoogleAPI Emulator"
           PLATFORM_VERSION: "12.0"
           APP: ${{ env.APP_URL }}
-
-          # App (para tu driver/esperas)
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
           APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
           LANGUAGE: ${{ env.LANGUAGE }}
           LOCALE: ${{ env.LOCALE }}
           APP_WAIT_ACTIVITY: ${{ env.APP_WAIT_ACTIVITY }}
           APP_WAIT_DURATION: ${{ env.APP_WAIT_DURATION }}
-          STRICT_APP_WAIT: ${{ env.STRICT_APP_WAIT }}
-
-          # Metadata para dashboard
           SAUCE_BUILD: "Build #${{ github.run_number }}"
           SAUCE_NAME:  "Behave - ${{ github.ref_name }}"
+          SAUCE_TAGS:  "CI,Android,Behave"
         run: |
           set -eux
+          echo "APPIUM_SERVER_URL=$APPIUM_SERVER_URL"
+          echo "APP=$APP"
           mkdir -p reports/allure-results
-          if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
-          else
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
-          fi
-
+          behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+          
+      # Subir reportes Allure
       - name: Subir artefactos (Allure)
         if: always()
         uses: actions/upload-artifact@v4

@@ -22,28 +22,29 @@ def _csv_env(name: str):
 
 
 def create_driver(config: dict):
-    # ----- Server / Hub -----
-    server_url = config.get("APPIUM_SERVER_URL", os.getenv("APPIUM_SERVER_URL", "http://127.0.0.1:4723"))
+    # ===== Hub / Server: AHORA ENV -> CONFIG -> DEFAULT =====
+    server_url = os.getenv("APPIUM_SERVER_URL", config.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723"))
     is_sauce = "saucelabs.com" in server_url
 
     options = UiAutomator2Options()
 
-    # ----- Básico -----
-    options.set_capability("platformName", config.get("PLATFORM_NAME", "Android"))
-    options.set_capability("appium:automationName", config.get("AUTOMATION_NAME", "UiAutomator2"))
+    # ===== Básico =====
+    options.set_capability("platformName", os.getenv("PLATFORM_NAME", config.get("PLATFORM_NAME", "Android")))
+    options.set_capability("appium:automationName", os.getenv("AUTOMATION_NAME", config.get("AUTOMATION_NAME", "UiAutomator2")))
 
-    # Device / UDID (local o cloud)
-    udid = config.get("UDID", os.getenv("UDID"))
+    # Device / UDID
+    udid = os.getenv("UDID", config.get("UDID"))
     if udid:
         options.set_capability("appium:udid", udid)
         options.set_capability("appium:deviceName", udid)
     else:
-        options.set_capability("appium:deviceName", config.get("DEVICE_NAME", os.getenv("DEVICE_NAME", "Android Emulator")))
+        options.set_capability("appium:deviceName", os.getenv("DEVICE_NAME", config.get("DEVICE_NAME", "Android Emulator")))
 
-    if config.get("PLATFORM_VERSION") or os.getenv("PLATFORM_VERSION"):
-        options.set_capability("appium:platformVersion", config.get("PLATFORM_VERSION", os.getenv("PLATFORM_VERSION")))
+    # platformVersion (ENV primero)
+    if os.getenv("PLATFORM_VERSION") or config.get("PLATFORM_VERSION"):
+        options.set_capability("appium:platformVersion", os.getenv("PLATFORM_VERSION", config.get("PLATFORM_VERSION")))
 
-    # Perfil KVM vs hosted (sólo aplica en local/hosted)
+    # Perfil KVM vs hosted (sólo para local/hosted)
     HAS_KVM = _bool(os.getenv("HAS_KVM"), False)
 
     # Timeouts (más cortos con KVM; más largos en hosted)
@@ -56,7 +57,7 @@ def create_driver(config: dict):
     # Calidad de vida en CI
     options.set_capability("appium:autoGrantPermissions", True)
     options.set_capability("appium:disableWindowAnimation", True)
-    options.set_capability("appium:newCommandTimeout", int(config.get("NEW_COMMAND_TIMEOUT", 180)))
+    options.set_capability("appium:newCommandTimeout", int(os.getenv("NEW_COMMAND_TIMEOUT", config.get("NEW_COMMAND_TIMEOUT", 180))))
     options.set_capability("appium:skipDeviceInitialization", True)
     options.set_capability("appium:disableAndroidWatchers", True)
 
@@ -70,11 +71,10 @@ def create_driver(config: dict):
     options.set_capability("appium:appWaitForLaunch", False)
     options.set_capability("appium:appWaitDuration", app_wait_duration_ms)
 
-    # appWaitActivity: prioridad ENV -> strict -> libre
+    # appWaitActivity: ENV -> strict -> libre
     pkg_env = os.getenv("APP_PACKAGE", config.get("APP_PACKAGE"))
     act_env = os.getenv("APP_ACTIVITY", config.get("APP_ACTIVITY"))
     strict_wait = _bool(os.getenv("STRICT_APP_WAIT"), False)
-
     app_wait_activity_env = os.getenv("APP_WAIT_ACTIVITY", config.get("APP_WAIT_ACTIVITY"))
     if app_wait_activity_env:
         options.set_capability("appium:appWaitActivity", app_wait_activity_env)
@@ -96,10 +96,10 @@ def create_driver(config: dict):
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
-    # ----- APP: local vs. cloud (Sauce/BS) -----
-    app_path = os.getenv("APP", config.get("APP"))
+    # ===== APP: ENV primero; soporta IDs/URLs de cloud =====
+    app_path = os.getenv("APP") or config.get("APP")
     if app_path:
-        # Si es ID/URL de cloud, no toques rutas locales
+        # Si es id/url de cloud, no tocamos rutas locales
         if app_path.startswith(("storage:", "sauce-storage:", "bs://")):
             options.set_capability("appium:app", app_path)
         else:
@@ -124,7 +124,7 @@ def create_driver(config: dict):
                 print(f"[WARN] APP path no existe: {app_path}")
             options.set_capability("appium:app", app_path)
 
-        # BYPASS manifest si ya pasamos pkg/activity por env
+        # BYPASS manifest si ya pasamos pkg/activity
         if pkg_env and act_env:
             options.set_capability("appium:appPackage", pkg_env)
             options.set_capability("appium:appActivity", act_env)
@@ -138,25 +138,22 @@ def create_driver(config: dict):
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 
-    # ----- Sauce Labs: metadata y opciones específicas -----
+    # ===== Sauce Labs: metadata opcional (dashboard) =====
     if is_sauce:
         sauce_opts = {
-            # aparecerán en el dashboard
             "build": os.getenv("SAUCE_BUILD", f"Build #{os.getenv('GITHUB_RUN_NUMBER', 'local')}"),
             "name":  os.getenv("SAUCE_NAME",  "Behave run"),
             "tags":  _csv_env("SAUCE_TAGS") or [os.getenv("GITHUB_REF_NAME", "CI"), "Android", "Behave"],
         }
-        # opcionales si los defines en el workflow
         if os.getenv("SAUCE_TUNNEL_NAME"):
             sauce_opts["tunnelName"] = os.getenv("SAUCE_TUNNEL_NAME")
         if os.getenv("APPIUM_VERSION"):
             sauce_opts["appiumVersion"] = os.getenv("APPIUM_VERSION")
         if os.getenv("DEVICE_ORIENTATION"):
             sauce_opts["deviceOrientation"] = os.getenv("DEVICE_ORIENTATION")
-
         options.set_capability("sauce:options", sauce_opts)
 
-    # ----- Logs de arranque -----
+    # ===== Logs de arranque =====
     print(f"[driver_factory] Appium server: {server_url}")
     print(f"[driver_factory] Using app: {app_path or (pkg_env or '<no-package>') + '/' + (act_env or '')}")
     if udid:
@@ -167,7 +164,7 @@ def create_driver(config: dict):
     if is_sauce:
         print(f"[driver_factory] sauce:options = {options.capabilities.get('sauce:options')}")
 
-    # ----- Crear sesión -----
+    # ===== Crear sesión =====
     driver = webdriver.Remote(server_url, options=options)
 
     # Ajustes UIA2: árbol más estable
