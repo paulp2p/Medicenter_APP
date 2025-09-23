@@ -220,32 +220,37 @@ jobs:
           adb -s "$dev" shell input keyevent 3 || true
           adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
 
-      - name: Watchdog ANR SystemUI (autoresolver)
+      - name: Watchdog ANR SystemUI (resolver por resource-id)
         run: |
           set -eux
-          dev="emulator-5554"
-          nohup bash > watchdog.log 2>&1 <<EOF &
-          set -e
+          dev="${ANDROID_SERIAL:-emulator-5554}"
+          # bucle en segundo plano, sin problemas de comillas
+          nohup bash <<'BASH' > watchdog.log 2>&1 &
+          set -euo pipefail
+          dev="${ANDROID_SERIAL:-emulator-5554}"
+          wait_id='android:id/aerr_wait'
+          close_id='android:id/aerr_close'
           while true; do
-            if adb -s "$dev" shell "dumpsys activity processes | grep -F \"ANR in com.android.systemui\"" >/dev/null 2>&1; then
-              adb -s "$dev" shell "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS" || true
-              for i in 1 2 3; do
-                adb -s "$dev" shell input keyevent 22 || true
-                adb -s "$dev" shell input keyevent 66 || true
-                sleep 1
-              done
-            else
-              # Heurística: popup "isn't responding"
-              adb -s "$dev" shell "uiautomator dump /sdcard/uidump.xml" >/dev/null 2>&1 || true
-              if adb -s "$dev" shell "grep -qi \"isn.t responding\" /sdcard/uidump.xml" >/dev/null 2>&1; then
-                adb -s "$dev" shell input tap 520 920 || true
+            # dump silencioso
+            adb -s "$dev" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
+            if adb -s "$dev" shell "grep -q \"$wait_id\\|$close_id\" /sdcard/uidump.xml" >/dev/null 2>&1; then
+              # tomar bounds del botón WAIT y calcular centro
+              bounds="$(adb -s "$dev" shell "grep -m1 \"$wait_id\" /sdcard/uidump.xml" \
+                      | sed -n 's/.*bounds=\"\\[\\([0-9]\\+\\),\\([0-9]\\+\\)\\]\\[\\([0-9]\\+\\),\\([0-9]\\+\\)\\]\".*/\\1 \\2 \\3 \\4/p')"
+              if [ -n "$bounds" ]; then
+                set -- $bounds; x=$(( ($1+$3)/2 )); y=$(( ($2+$4)/2 ))
+                adb -s "$dev" shell input tap "$x" "$y" || true
+              else
+                # fallback por teclas: abajo + enter suele seleccionar "Wait"
+                adb -s "$dev" shell input keyevent 20 || true  # DPAD_DOWN
+                adb -s "$dev" shell input keyevent 66 || true  # ENTER
               fi
+              adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+              adb -s "$dev" shell cmd statusbar collapse || true
             fi
-            adb -s "$dev" shell cmd statusbar collapse || true
             sleep 2
           done
-          EOF
-
+          BASH
 
       - name: Desbloquear, desactivar animaciones y silenciar notificaciones
         run: |
