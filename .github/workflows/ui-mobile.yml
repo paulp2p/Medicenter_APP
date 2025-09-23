@@ -57,6 +57,12 @@ jobs:
           fi
           
       # Configurar rclone
+            - name: Instalar utilidades (rclone, jq, curl)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y rclone jq curl
+
       - name: Configurar rclone (desde secreto base64)
         env:
           RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
@@ -69,35 +75,32 @@ jobs:
           if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
           printf '%s' "$CLEAN" | base64 -d > "${HOME}/.config/rclone/rclone.conf"
           echo "== Remotos disponibles ==" && rclone listremotes
-          # Verifica que 'gdrive' exista
+          # Verifica que exista el remoto [gdrive]
           rclone config show gdrive: >/dev/null 2>&1 || { echo "No existe remoto [gdrive] en rclone.conf"; exit 1; }
 
-      # (Opcional) Descargar APK desde Drive
       - name: Descargar APK (Drive)
         run: |
+          set -eux
           rclone ls "gdrive:${GDRIVE_APK_PATH}"
           rclone copyto "gdrive:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
-      # Subir APK al Storage de Sauce (US West)
       - name: Subir APK a Sauce Storage (US West)
         env:
           SAUCE_USERNAME: ${{ secrets.SAUCE_USERNAME }}
           SAUCE_ACCESS_KEY: ${{ secrets.SAUCE_ACCESS_KEY }}
         run: |
           set -eux
-          test -f "${APK_LOCAL_NAME}"
           RESP=$(curl -s -u "$SAUCE_USERNAME:$SAUCE_ACCESS_KEY" \
                  -X POST "https://api.us-west-1.saucelabs.com/v1/storage/upload" \
-                 -F "payload=@${APK_LOCAL_NAME}" -F "name=${APK_LOCAL_NAME}")
+                 -F "payload=@${APK_LOCAL_NAME}" \
+                 -F "name=${APK_LOCAL_NAME}" \
+                 -F "overwrite=true")
           echo "$RESP" | jq .
-          # El Storage acepta 'storage:filename=...' como 'app'
           APP_URL=$(echo "$RESP" | jq -r '.item.id // .id // empty')
-          if [ -z "$APP_URL" ]; then
-            # si ya existía, podemos usar storage:filename=...
-            APP_URL="storage:filename=${APK_LOCAL_NAME}"
-          fi
+          [ -n "$APP_URL" ] || APP_URL="storage:filename=${APK_LOCAL_NAME}"
           echo "APP_URL=$APP_URL" >> $GITHUB_ENV
+
 
       # Ejecutar Behave contra el hub de Sauce (US West)
       - name: Ejecutar tests (Behave → Sauce)
