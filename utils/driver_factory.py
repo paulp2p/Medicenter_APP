@@ -1,6 +1,7 @@
 import os
 from appium import webdriver
 
+# Appium Python client v3+ / v2.x
 try:
     from appium.options.android import UiAutomator2Options  # v3+
 except Exception:
@@ -15,15 +16,23 @@ def _bool(val, default=False):
     return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def _csv_env(name: str):
+    raw = os.getenv(name, "")
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
 def create_driver(config: dict):
+    # ----- Server / Hub -----
     server_url = config.get("APPIUM_SERVER_URL", os.getenv("APPIUM_SERVER_URL", "http://127.0.0.1:4723"))
+    is_sauce = "saucelabs.com" in server_url
+
     options = UiAutomator2Options()
 
-    # Básico
+    # ----- Básico -----
     options.set_capability("platformName", config.get("PLATFORM_NAME", "Android"))
     options.set_capability("appium:automationName", config.get("AUTOMATION_NAME", "UiAutomator2"))
 
-    # Device / UDID
+    # Device / UDID (local o cloud)
     udid = config.get("UDID", os.getenv("UDID"))
     if udid:
         options.set_capability("appium:udid", udid)
@@ -34,10 +43,10 @@ def create_driver(config: dict):
     if config.get("PLATFORM_VERSION") or os.getenv("PLATFORM_VERSION"):
         options.set_capability("appium:platformVersion", config.get("PLATFORM_VERSION", os.getenv("PLATFORM_VERSION")))
 
-    # Perfil KVM vs hosted
+    # Perfil KVM vs hosted (sólo aplica en local/hosted)
     HAS_KVM = _bool(os.getenv("HAS_KVM"), False)
 
-    # Timeouts base (más cortos con KVM; más largos en hosted)
+    # Timeouts (más cortos con KVM; más largos en hosted)
     adb_exec_timeout_ms     = 180_000 if HAS_KVM else int(os.getenv("ADB_EXEC_TIMEOUT", "600000"))
     uia2_install_timeout_ms = 120_000 if HAS_KVM else int(os.getenv("UIA2_INSTALL_TIMEOUT", "300000"))
     uia2_launch_timeout_ms  = 120_000 if HAS_KVM else int(os.getenv("UIA2_LAUNCH_TIMEOUT", "300000"))
@@ -57,8 +66,8 @@ def create_driver(config: dict):
     options.set_capability("appium:uiautomator2ServerLaunchTimeout", uia2_launch_timeout_ms)
     options.set_capability("appium:androidInstallTimeout", android_install_timeout)
 
-    # Launch/wait de la app
-    options.set_capability("appium:appWaitForLaunch", False)  # <- evita el "never started" con cambios rápidos de activity
+    # Launch/wait de la app (relajado para evitar "never started")
+    options.set_capability("appium:appWaitForLaunch", False)
     options.set_capability("appium:appWaitDuration", app_wait_duration_ms)
 
     # appWaitActivity: prioridad ENV -> strict -> libre
@@ -74,7 +83,7 @@ def create_driver(config: dict):
     else:
         options.set_capability("appium:appWaitActivity", ".*")
 
-    # Reset/instalación (preferimos que Appium NO fuerce reinstal; ya lo maneja el workflow)
+    # Reset/instalación (Appium NO fuerza reinstalar; lo maneja el workflow)
     options.set_capability("appium:noReset", _bool(os.getenv("NO_RESET", "true"), True))
     options.set_capability("appium:enforceAppInstall", _bool(os.getenv("ENFORCE_APP_INSTALL", "false"), False))
     options.set_capability("appium:dontStopAppOnReset", False)
@@ -87,29 +96,33 @@ def create_driver(config: dict):
     options.set_capability("appium:printPageSourceOnFindFailure", True)
     options.set_capability("appium:ignoreHiddenApiPolicyError", True)
 
-    # Ruta APP (o package/activity)
+    # ----- APP: local vs. cloud (Sauce/BS) -----
     app_path = os.getenv("APP", config.get("APP"))
     if app_path:
-        # Normalizar path Windows->Linux en CI
-        if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
-            win_basename = os.path.basename(app_path.replace("\\", "/"))
-            candidate = os.path.abspath(win_basename)
-            if os.path.exists(candidate):
-                print(f"[driver_factory] Normalizado APP desde Windows a: {candidate}")
-                app_path = candidate
-            else:
-                gw = os.getenv("GITHUB_WORKSPACE")
-                if gw:
-                    candidate2 = os.path.join(gw, win_basename)
-                    if os.path.exists(candidate2):
-                        print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
-                        app_path = candidate2
+        # Si es ID/URL de cloud, no toques rutas locales
+        if app_path.startswith(("storage:", "sauce-storage:", "bs://")):
+            options.set_capability("appium:app", app_path)
+        else:
+            # Normalizar path Windows->Linux en CI
+            if os.name != "nt" and (":\\" in app_path or ":/" in app_path):
+                win_basename = os.path.basename(app_path.replace("\\", "/"))
+                candidate = os.path.abspath(win_basename)
+                if os.path.exists(candidate):
+                    print(f"[driver_factory] Normalizado APP desde Windows a: {candidate}")
+                    app_path = candidate
+                else:
+                    gw = os.getenv("GITHUB_WORKSPACE")
+                    if gw:
+                        candidate2 = os.path.join(gw, win_basename)
+                        if os.path.exists(candidate2):
+                            print(f"[driver_factory] Normalizado APP (workspace) a: {candidate2}")
+                            app_path = candidate2
 
-        if not os.path.isabs(app_path):
-            app_path = os.path.abspath(app_path)
-        if not os.path.exists(app_path):
-            print(f"[WARN] APP path no existe: {app_path}")
-        options.set_capability("appium:app", app_path)
+            if not os.path.isabs(app_path):
+                app_path = os.path.abspath(app_path)
+            if not os.path.exists(app_path):
+                print(f"[WARN] APP path no existe: {app_path}")
+            options.set_capability("appium:app", app_path)
 
         # BYPASS manifest si ya pasamos pkg/activity por env
         if pkg_env and act_env:
@@ -121,26 +134,49 @@ def create_driver(config: dict):
         if act_env:
             options.set_capability("appium:appActivity", act_env)
 
-    # System port (paralelismo)
+    # System port (paralelismo local)
     if os.getenv("SYSTEM_PORT"):
         options.set_capability("appium:systemPort", int(os.getenv("SYSTEM_PORT")))
 
+    # ----- Sauce Labs: metadata y opciones específicas -----
+    if is_sauce:
+        sauce_opts = {
+            # aparecerán en el dashboard
+            "build": os.getenv("SAUCE_BUILD", f"Build #{os.getenv('GITHUB_RUN_NUMBER', 'local')}"),
+            "name":  os.getenv("SAUCE_NAME",  "Behave run"),
+            "tags":  _csv_env("SAUCE_TAGS") or [os.getenv("GITHUB_REF_NAME", "CI"), "Android", "Behave"],
+        }
+        # opcionales si los defines en el workflow
+        if os.getenv("SAUCE_TUNNEL_NAME"):
+            sauce_opts["tunnelName"] = os.getenv("SAUCE_TUNNEL_NAME")
+        if os.getenv("APPIUM_VERSION"):
+            sauce_opts["appiumVersion"] = os.getenv("APPIUM_VERSION")
+        if os.getenv("DEVICE_ORIENTATION"):
+            sauce_opts["deviceOrientation"] = os.getenv("DEVICE_ORIENTATION")
+
+        options.set_capability("sauce:options", sauce_opts)
+
+    # ----- Logs de arranque -----
     print(f"[driver_factory] Appium server: {server_url}")
     print(f"[driver_factory] Using app: {app_path or (pkg_env or '<no-package>') + '/' + (act_env or '')}")
     if udid:
         print(f"[driver_factory] UDID/serial: {udid}")
     print(f"[driver_factory] HAS_KVM={HAS_KVM}")
-    print(f"[driver_factory] appWaitActivity={options.capabilities.get('appium:appWaitActivity')}, appWaitDuration={app_wait_duration_ms}ms, noReset={options.capabilities.get('appium:noReset')}")
+    print(f"[driver_factory] appWaitActivity={options.capabilities.get('appium:appWaitActivity')}, "
+          f"appWaitDuration={app_wait_duration_ms}ms, noReset={options.capabilities.get('appium:noReset')}")
+    if is_sauce:
+        print(f"[driver_factory] sauce:options = {options.capabilities.get('sauce:options')}")
 
+    # ----- Crear sesión -----
     driver = webdriver.Remote(server_url, options=options)
 
-    # UIA2 settings: estabilidad del árbol (1s) y ack rápido
+    # Ajustes UIA2: árbol más estable
     try:
         driver.update_settings({
             "waitForIdleTimeout": 1000,
             "actionAcknowledgmentTimeout": 500
         })
     except Exception as e:
-            print(f"[driver_factory] update_settings warning: {e}")
+        print(f"[driver_factory] update_settings warning: {e}")
 
     return driver

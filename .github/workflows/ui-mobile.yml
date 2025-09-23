@@ -1,35 +1,22 @@
-name: Android Behave Tests (Ubuntu AOSP, no Play Services)
+name: Android Behave Tests (Sauce Labs US West)
 
 on:
   workflow_dispatch:
     inputs:
       behave_tags:
-        description: 'Etiquetas Behave (ej: @smoke, @regression) — opcional'
+        description: 'Etiquetas Behave (opcional)'
         required: false
         default: ''
   push:
     branches: [ main, master ]
-  pull_request:
 
 concurrency:
   group: android-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-  ANDROID_AVD_HOME: ${{ github.workspace }}/.android/avd
-  API_LEVEL: 30
-  AVD_NAME: ci-pixel5-api30
-  DEVICE_PROFILE: pixel_5
   APK_LOCAL_NAME: medicenter_app.apk
-  PY_VERSION: "3.11"
-
-  # Appium
-  USE_APPIUM: "true"
-  APPIUM_HOST: "127.0.0.1"
-  APPIUM_PORT: "4723"
-
-  # Google Drive / rclone
+  # Si usas Drive:
   RCLONE_REMOTE: "gdrive"
   GDRIVE_APK_PATH: "CI/medicenter_app.apk"
 
@@ -37,314 +24,93 @@ env:
   APP_PACKAGE: "com.siltium.medicenter"
   APP_ACTIVITY: "com.siltium.medicenter.MainActivity"
 
-  # Idioma (anchors en inglés)
+  # Idioma (tus anclas en inglés)
   LANGUAGE: "en"
   LOCALE: "US"
 
-  # Esperas Appium (hosted sin KVM)
-  APP_WAIT_DURATION: "180000"
+  # Esperas recomendadas
   APP_WAIT_ACTIVITY: ".*"
+  APP_WAIT_DURATION: "180000"
   STRICT_APP_WAIT: "false"
 
 jobs:
-  android-behave:
+  android-cloud:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Node (Appium)
-        if: env.USE_APPIUM == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PY_VERSION }}
+          python-version: "3.11"
           cache: "pip"
 
       - name: Instalar dependencias Python
         run: |
-          set -eux
           python -m pip install -U pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install behave selenium appium-python-client allure-behave
+            pip install behave selenium appium-python-client allure-behave jq
           fi
 
-      # ---------- RCLONE ----------
-      - name: Instalar rclone
+      # (Opcional) Descargar APK desde Drive
+      - name: Descargar APK (Drive)
+        if: ${{ env.RCLONE_REMOTE != '' && env.GDRIVE_APK_PATH != '' }}
         run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y rclone netcat-openbsd curl unzip
-
-      - name: Configurar rclone (desde secreto base64)
-        env:
-          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
-        run: |
-          set -euo pipefail
-          [ -n "${RCLONE_CONF_B64:-}" ] || { echo "Falta secrets.RCLONE_CONF_B64"; exit 1; }
-          mkdir -p ~/.config/rclone
-          CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
-          PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
-          if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
-          printf '%s' "$CLEAN" | base64 -d > ~/.config/rclone/rclone.conf
-          rclone version && rclone listremotes
-
-      - name: "Smoke test: descarga de APK"
-        run: |
-          set -eux
-          rclone ls "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}"
+          sudo apt-get update && sudo apt-get install -y rclone
           rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
-      # ---------- LIBRERÍAS DEL EMULADOR ----------
-      - name: Instalar dependencias del emulador (libs)
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y \
-            libpulse0 libasound2t64 libnss3 \
-            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxi6 libxtst6 libxrandr2 \
-            libxkbcommon0 libxdamage1 libxfixes3 libxrender1 \
-            libgl1 libgles2 libvulkan1 mesa-vulkan-drivers libdrm2 libxshmfence1 libgbm1 \
-            libfontconfig1 ca-certificates
-
-      # ---------- ANDROID SDK + AOSP (sin Play Services) ----------
-      - name: Instalar Android SDK (cmdline-tools) y componentes
-        run: |
-          set -eux
-          mkdir -p "$ANDROID_SDK_ROOT"
-          cd "$ANDROID_SDK_ROOT"
-          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          mkdir -p cmdline-tools
-          unzip -q cmdline-tools.zip -d cmdline-tools
-          mv cmdline-tools/cmdline-tools cmdline-tools/latest
-          rm -f cmdline-tools.zip
-
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-
-          ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null ) || true
-          ( yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
-              "platform-tools" "emulator" "platforms;android-${API_LEVEL}" \
-              "build-tools;30.0.3" \
-              "system-images;android-${API_LEVEL};default;x86_64" ) || true
-
-          sudo mkdir -p /usr/local/lib/android
-          [ -e /usr/local/lib/android/sdk ] || sudo ln -s "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk
-
-          adb version
-          emulator -version
-
-      - name: Crear AVD (AOSP default; perfil liviano para TCG)
-        run: |
-          set -eux
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          mkdir -p "$ANDROID_AVD_HOME"
-          yes "no" | avdmanager create avd \
-            -n "$AVD_NAME" -k "system-images;android-${API_LEVEL};default;x86_64" \
-            -d "$DEVICE_PROFILE" --force
-
-          AVD_CFG="$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
-          {
-            echo "tag.id=default"
-            echo "abi.type=x86_64"
-            echo "image.sysdir.1=$ANDROID_SDK_ROOT/system-images/android-${API_LEVEL}/default/x86_64"
-
-            # TCG-friendly
-            echo "hw.cpu.ncore=1"
-            echo "hw.ramSize=2048"
-            echo "vm.heapSize=384"
-            echo "disk.dataPartition.size=3072M"
-
-            # GPU software
-            echo "hw.gpu.enabled=yes"
-            echo "hw.gpu.mode=swiftshader_indirect"
-
-            # Pantalla 720p
-            echo "hw.lcd.width=720"
-            echo "hw.lcd.height=1280"
-            echo "hw.lcd.density=280"
-          } >> "$AVD_CFG"
-
-      - name: Iniciar emulador (headless, sin KVM) y gate robusto
-        run: |
-          set -euxo pipefail
-          export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          export ANDROID_EMULATOR_USE_SYSTEM_LIBS=1
-          export ADB_VENDOR_KEYS=
-          : > emulator.log
-
-          nohup emulator -avd "$AVD_NAME" \
-            -no-window -no-boot-anim -no-snapshot \
-            -accel off -no-metrics \
-            -gpu swiftshader_indirect -noaudio -camera-back none -camera-front none \
-            -port 5554 -ports 5554,5555 > emulator.log 2>&1 &
-
-          adb start-server
-          timeout 180s bash -c 'until adb -s emulator-5554 get-state 2>/dev/null; do sleep 2; done'
-
-          # Gate robusto: framework + PackageManager respondiendo
-          deadline=$((SECONDS+600))
-          until adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q 1 && \
-                adb -s emulator-5554 shell "cmd package list packages >/dev/null 2>&1"; do
-            [ $SECONDS -lt $deadline ] || { echo "[boot] timeout esperando framework/pm"; tail -n +200 emulator.log || true; exit 1; }
-            sleep 2
-          done
-
-          echo "ANDROID_SERIAL=emulator-5554" >> "$GITHUB_ENV"
-
-      - name: Cool-down post boot (evita ANR inicial)
-        run: |
-          set -eux
-          dev="emulator-5554"
-          sleep 15
-          adb -s "$dev" shell am start -W -n com.android.settings/.Settings || true
-          sleep 2
-          adb -s "$dev" shell input keyevent 3 || true
-          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
-
-      - name: Watchdog ANR SystemUI (resolver por resource-id)
-        run: |
-          set -eux
-          dev="${ANDROID_SERIAL:-emulator-5554}"
-          nohup bash <<'BASH' > watchdog.log 2>&1 &
-          set -euo pipefail
-          dev="${ANDROID_SERIAL:-emulator-5554}"
-          wait_id='android:id/aerr_wait'
-          close_id='android:id/aerr_close'
-          while true; do
-            adb -s "$dev" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
-            if adb -s "$dev" shell "grep -q \"$wait_id\\|$close_id\" /sdcard/uidump.xml" >/dev/null 2>&1; then
-              bounds="$(adb -s "$dev" shell "grep -m1 \"$wait_id\" /sdcard/uidump.xml" \
-                       | sed -n 's/.*bounds=\"\\[\\([0-9]\\+\\),\\([0-9]\\+\\)\\]\\[\\([0-9]\\+\\),\\([0-9]\\+\\)\\]\".*/\\1 \\2 \\3 \\4/p')"
-              if [ -n "$bounds" ]; then
-                set -- $bounds; x=$(( ($1+$3)/2 )); y=$(( ($2+$4)/2 ))
-                adb -s "$dev" shell input tap "$x" "$y" || true
-              else
-                adb -s "$dev" shell input keyevent 20 || true  # DPAD_DOWN
-                adb -s "$dev" shell input keyevent 66 || true  # ENTER
-              fi
-              adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
-              adb -s "$dev" shell cmd statusbar collapse || true
-            fi
-            sleep 2
-          done
-          BASH
-
-      - name: Desbloquear, desactivar animaciones y silenciar notificaciones
-        run: |
-          set -eux
-          dev="emulator-5554"
-          adb -s $dev shell input keyevent 224 || true
-          adb -s $dev shell wm dismiss-keyguard || true
-          adb -s $dev shell input keyevent 82 || true
-          adb -s $dev shell input keyevent 3  || true
-
-          # Asegurar servicios base primero
-          for i in $(seq 1 60); do adb -s $dev shell 'pm path android' >/dev/null 2>&1 && break || sleep 2; done
-          for i in $(seq 1 60); do adb -s $dev shell 'settings list system' >/dev/null 2>&1 && break || sleep 2; done
-
-          adb -s $dev shell settings put global window_animation_scale 0 || true
-          adb -s $dev shell settings put global transition_animation_scale 0 || true
-          adb -s $dev shell settings put global animator_duration_scale 0 || true
-          adb -s $dev shell svc power stayon true || true
-          adb -s $dev shell settings put global heads_up_notifications_enabled 0 || true
-          adb -s $dev shell cmd statusbar collapse || true
-
-      - name: Instalar y arrancar Appium
-        if: env.USE_APPIUM == 'true'
-        run: |
-          set -euxo pipefail
-          NPM_BIN="$(npm root -g)/.bin"
-          [ -d "$NPM_BIN" ] && echo "$NPM_BIN" >> "$GITHUB_PATH" || true
-          node -v; npm -v
-          npm i -g appium@3 appium-uiautomator2-driver@latest
-          appium --version
-          appium driver install uiautomator2 || true
-          command -v fuser >/dev/null 2>&1 && fuser -k 4723/tcp || true
-          command -v lsof  >/dev/null 2>&1 && lsof -ti tcp:4723 | xargs -r kill -9 || true
-          : > appium.log
-          nohup appium --relaxed-security --allow-insecure=adb_shell \
-            --address "$APPIUM_HOST" --port "$APPIUM_PORT" > appium.log 2>&1 &
-          for i in $(seq 1 120); do
-            curl -fsS "http://$APPIUM_HOST:$APPIUM_PORT/status" >/dev/null && break || true
-            pgrep -f "appium .*--port $APPIUM_PORT" >/dev/null || { echo "Appium se detuvo"; sed -n '1,400p' appium.log || true; exit 1; }
-            sleep 1
-          done
-
-      - name: Instalar APK en el emulador (robusto)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          dev="emulator-5554"
-
-          adb -s "$dev" shell settings put global verifier_verify_adb_installs 0 || true
-          if [ -n "${APP_PACKAGE:-}" ]; then
-            adb -s "$dev" shell "am force-stop ${APP_PACKAGE}" || true
-            adb -s "$dev" shell "pm clear ${APP_PACKAGE}" || true
-            adb -s "$dev" uninstall "${APP_PACKAGE}" || true
-          fi
-
-          if ! adb -s "$dev" install -r -d -t "${APK_LOCAL_NAME}" | tee adb-install.log; then
-            echo "Instalación streamed falló; usando package session…"
-            adb -s "$dev" push -p "${APK_LOCAL_NAME}" /data/local/tmp/app-under-test.apk
-            sess="$(adb -s "$dev" shell 'cmd package install-create -r -d -t' | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)"
-            [ -n "$sess" ] || { echo "No se pudo crear sesión de instalación"; exit 1; }
-            adb -s "$dev" shell "cmd package install-write ${sess} base /data/local/tmp/app-under-test.apk"
-            adb -s "$dev" shell "cmd package install-commit ${sess}"
-          fi
-
-          adb -s "$dev" shell cmd statusbar collapse || true
-
-      - name: Prelanzar app y cerrar diálogos del sistema
-        run: |
-          set -eux
-          dev="emulator-5554"
-          # lanzamiento neutral (independiente de alias/splash)
-          adb -s "$dev" shell monkey -p com.siltium.medicenter -c android.intent.category.LAUNCHER 1 || true
-          sleep 3
-          adb -s "$dev" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
-          # Dump de actividad actual (para diagnóstico)
-          adb -s "$dev" shell dumpsys activity activities | head -n 120 || true
-
-      - name: Ejecutar tests (Behave)
-        if: env.USE_APPIUM == 'true'
-        timeout-minutes: 55
+      # Subir APK al Storage de Sauce (US West)
+      - name: Subir APK a Sauce Storage (US West)
         env:
-          DEVICE_NAME: "emulator-5554"
+          SAUCE_USERNAME: ${{ secrets.SAUCE_USERNAME }}
+          SAUCE_ACCESS_KEY: ${{ secrets.SAUCE_ACCESS_KEY }}
+        run: |
+          set -eux
+          test -f "${APK_LOCAL_NAME}"
+          RESP=$(curl -s -u "$SAUCE_USERNAME:$SAUCE_ACCESS_KEY" \
+                 -X POST "https://api.us-west-1.saucelabs.com/v1/storage/upload" \
+                 -F "payload=@${APK_LOCAL_NAME}" -F "name=${APK_LOCAL_NAME}")
+          echo "$RESP" | jq .
+          # El Storage acepta 'storage:filename=...' como 'app'
+          APP_URL=$(echo "$RESP" | jq -r '.item.id // .id // empty')
+          if [ -z "$APP_URL" ]; then
+            # si ya existía, podemos usar storage:filename=...
+            APP_URL="storage:filename=${APK_LOCAL_NAME}"
+          fi
+          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
+
+      # Ejecutar Behave contra el hub de Sauce (US West)
+      - name: Ejecutar tests (Behave → Sauce)
+        env:
+          # Hub Sauce US West (no levantes Appium local)
+          APPIUM_SERVER_URL: https://${{ secrets.SAUCE_USERNAME }}:${{ secrets.SAUCE_ACCESS_KEY }}@ondemand.us-west-1.saucelabs.com/wd/hub
+
+          # Caps estándar
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          APPIUM_SERVER_URL: "http://${{ env.APPIUM_HOST }}:${{ env.APPIUM_PORT }}"
+          DEVICE_NAME: "Android GoogleAPI Emulator"  # emulador gestionado por Sauce
+          PLATFORM_VERSION: "12.0"
+          APP: ${{ env.APP_URL }}
+
+          # App (para tu driver/esperas)
           APP_PACKAGE: ${{ env.APP_PACKAGE }}
           APP_ACTIVITY: ${{ env.APP_ACTIVITY }}
+          LANGUAGE: ${{ env.LANGUAGE }}
+          LOCALE: ${{ env.LOCALE }}
+          APP_WAIT_ACTIVITY: ${{ env.APP_WAIT_ACTIVITY }}
+          APP_WAIT_DURATION: ${{ env.APP_WAIT_DURATION }}
+          STRICT_APP_WAIT: ${{ env.STRICT_APP_WAIT }}
+
+          # Metadata para dashboard
+          SAUCE_BUILD: "Build #${{ github.run_number }}"
+          SAUCE_NAME:  "Behave - ${{ github.ref_name }}"
         run: |
           set -eux
-          export UDID="emulator-5554"
-          export APP="${APK_LOCAL_NAME}"
-          export ANDROID_INSTALL_TIMEOUT=600000
-          export NO_RESET=true
-          export ENFORCE_APP_INSTALL=false
-          export ADB_EXEC_TIMEOUT=300000
-          export UIA2_INSTALL_TIMEOUT=300000
-          export UIA2_LAUNCH_TIMEOUT=300000
-
           mkdir -p reports/allure-results
           if [ -n "${{ github.event.inputs.behave_tags }}" ]; then
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results -t "${{ github.event.inputs.behave_tags }}"
@@ -352,34 +118,10 @@ jobs:
             behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           fi
 
-      - name: Capturar logcat (10 min) para diagnóstico
-        if: always()
-        run: |
-          set -euxo pipefail
-          dev="emulator-5554"
-          : > logcat.txt
-          timeout 60s adb -s "$dev" logcat -d -b all -v threadtime -T 10m >> logcat.txt || true
-
-      - name: Subir artefactos (Allure, logs)
+      - name: Subir artefactos (Allure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: allure-and-logs
-          path: |
-            reports/allure-results/**
-            appium.log
-            adb-install.log
-            emulator.log
-            logcat.txt
-            watchdog.log
-          if-no-files-found: warn
+          name: allure-results
+          path: reports/allure-results/**
           retention-days: 7
-
-      - name: Apagar emulador y limpiar
-        if: always()
-        run: |
-          set -eux
-          adb -s emulator-5554 emu kill || true
-          pkill -f "emulator" || true
-          pkill -f "appium" || true
-          adb kill-server || true
