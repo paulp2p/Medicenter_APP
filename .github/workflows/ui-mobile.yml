@@ -116,7 +116,7 @@ jobs:
           # Caps base
           PLATFORM_NAME: "Android"
           AUTOMATION_NAME: "UiAutomator2"
-          DEVICE_NAME: "Google Pixel 5"
+          DEVICE_NAME: "Google Pixel 6"
           PLATFORM_VERSION: "12.0"
 
           # App desde el upload a BS (bs://...)
