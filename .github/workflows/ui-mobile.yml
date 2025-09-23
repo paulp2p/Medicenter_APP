@@ -57,7 +57,7 @@ jobs:
           fi
           
       # Configurar rclone
-            - name: Instalar utilidades (rclone, jq, curl)
+      - name: Instalar utilidades (rclone, jq, curl)
         run: |
           set -eux
           sudo apt-get update
