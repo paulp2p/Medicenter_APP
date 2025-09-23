@@ -55,13 +55,28 @@ jobs:
           else
             pip install behave selenium appium-python-client allure-behave jq
           fi
+          
+      # Configurar rclone
+      - name: Configurar rclone (desde secreto base64)
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          [ -n "${RCLONE_CONF_B64:-}" ] || { echo "Falta secrets.RCLONE_CONF_B64"; exit 1; }
+          mkdir -p "${HOME}/.config/rclone"
+          CLEAN="$(printf '%s' "$RCLONE_CONF_B64" | tr -d '\r\n\t ' )"
+          PAD=$(( (4 - (${#CLEAN} % 4)) % 4 ))
+          if [ $PAD -gt 0 ]; then CLEAN="${CLEAN}$(printf '=%.0s' $(seq 1 $PAD))"; fi
+          printf '%s' "$CLEAN" | base64 -d > "${HOME}/.config/rclone/rclone.conf"
+          echo "== Remotos disponibles ==" && rclone listremotes
+          # Verifica que 'gdrive' exista
+          rclone config show gdrive: >/dev/null 2>&1 || { echo "No existe remoto [gdrive] en rclone.conf"; exit 1; }
 
       # (Opcional) Descargar APK desde Drive
       - name: Descargar APK (Drive)
-        if: ${{ env.RCLONE_REMOTE != '' && env.GDRIVE_APK_PATH != '' }}
         run: |
-          sudo apt-get update && sudo apt-get install -y rclone
-          rclone copyto "${RCLONE_REMOTE}:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
+          rclone ls "gdrive:${GDRIVE_APK_PATH}"
+          rclone copyto "gdrive:${GDRIVE_APK_PATH}" "${APK_LOCAL_NAME}"
           ls -lh "${APK_LOCAL_NAME}"
 
       # Subir APK al Storage de Sauce (US West)
