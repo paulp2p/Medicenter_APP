@@ -102,31 +102,32 @@ pipeline {
     }
 
     stage('Fetch APK (rclone desde Drive)') {
-      steps {
-        withCredentials([string(credentialsId: 'RCLONE_CONF_B64', variable: 'RCLONE_CONF_B64')]) {
-          bat '''
-            if not exist ".tools" mkdir .tools
-            if not exist ".tools\\rclone.exe" (
-              curl -L -o rclone.zip https://downloads.rclone.org/rclone-current-windows-amd64.zip
-              powershell -NoProfile -Command "Expand-Archive -Force rclone.zip .tools\\rclone_zip"
-              for /r ".tools\\rclone_zip" %%F in (rclone.exe) do copy "%%F" ".tools\\rclone.exe" >nul
-              rmdir /s /q ".tools\\rclone_zip"
-              del rclone.zip
-            )
-            set "RCLONE_CMD=%CD%\\.tools\\rclone.exe"
+        steps {
+            withCredentials([string(credentialsId: 'RCLONE_CONF_B64', variable: 'RCLONE_CONF_B64')]) {
+            bat '''
+                if not exist ".tools" mkdir .tools
+                if not exist ".tools\\rclone.exe" (
+                curl -L -o rclone.zip https://downloads.rclone.org/rclone-current-windows-amd64.zip
+                powershell -NoProfile -Command "Expand-Archive -Force rclone.zip .tools\\rclone_zip"
+                for /r ".tools\\rclone_zip" %%F in (rclone.exe) do copy "%%F" ".tools\\rclone.exe" >nul
+                rmdir /s /q ".tools\\rclone_zip"
+                del rclone.zip
+                )
+                set "RCLONE_CMD=%CD%\\.tools\\rclone.exe"
 
-            if not exist "%USERPROFILE%\\.config\\rclone" mkdir "%USERPROFILE%\\.config\\rclone"
-            powershell -NoProfile -Command "[IO.File]::WriteAllBytes('$env:USERPROFILE\\.config\\rclone\\rclone.conf',[Convert]::FromBase64String($env:RCLONE_CONF_B64))"
+                rem === escribir config donde rclone lo espera en Windows ===
+                if not exist "%APPDATA%\\rclone" mkdir "%APPDATA%\\rclone"
+                powershell -NoProfile -Command "[IO.File]::WriteAllBytes($env:APPDATA+'\\rclone\\rclone.conf',[Convert]::FromBase64String($env:RCLONE_CONF_B64))"
+                set "RCLONE_CONF=%APPDATA%\\rclone\\rclone.conf"
 
-            if not exist "app" mkdir app
-            "%RCLONE_CMD%" copyto "%GDRIVE_REMOTE%:%APK_DRIVE_PATH%" "%APK_LOCAL_PATH%" --progress
+                if not exist "app" mkdir app
+                "%RCLONE_CMD%" --config "%RCLONE_CONF%" copyto "%GDRIVE_REMOTE%:%APK_DRIVE_PATH%" "%APK_LOCAL_PATH%" --progress
 
-            if not exist "%APK_LOCAL_PATH%" ( echo ERROR: No se descargo la APK && exit /b 1 )
-            dir "%APK_LOCAL_PATH%"
-          '''
+                if not exist "%APK_LOCAL_PATH%" ( echo ERROR: No se descargo la APK && exit /b 1 )
+            '''
+            }
         }
-      }
-    }
+        }
 
     stage('Iniciar Emulador') {
       options { timeout(time: 20, unit: 'MINUTES') }
