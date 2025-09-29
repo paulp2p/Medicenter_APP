@@ -4,7 +4,7 @@ pipeline {
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '15'))
-    timeout(time: 120, unit: 'MINUTES')  // primera corrida puede tardar
+    timeout(time: 120, unit: 'MINUTES')
   }
 
   parameters {
@@ -42,11 +42,28 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Android SDK & cmdline-tools') {
+    stage('Android SDK & cmdline-tools (con Java 17 portable)') {
       options { timeout(time: 35, unit: 'MINUTES') }
       steps {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
+
+          rem === 0) JDK 17 PORTABLE para sdkmanager/avdmanager ===
+          if not exist ".tools" mkdir .tools
+          if not exist ".tools\\jdk17\\bin\\java.exe" (
+            echo Descargando JDK 17 portable...
+            curl -L -o jdk17.zip https://github.com/adoptium/temurin17-binaries/releases/latest/download/OpenJDK17U-jdk_x64_windows_hotspot.zip
+            powershell -NoProfile -Command "Expand-Archive -Force jdk17.zip .tools\\jdk17_tmp"
+            for /d %%D in (.tools\\jdk17_tmp\\*) do set JDKDIR=%%~fD
+            if not exist "!JDKDIR!" ( echo ERROR: No se pudo expandir el JDK17 & exit /b 1 )
+            move "!JDKDIR!" ".tools\\jdk17" >nul
+            rmdir /s /q ".tools\\jdk17_tmp"
+            del jdk17.zip
+          )
+          set "JAVA_HOME=%CD%\\.tools\\jdk17"
+          set "PATH=%JAVA_HOME%\\bin;%PATH%"
+
+          rem === 1) Cmdline-tools ===
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
 
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
@@ -59,7 +76,9 @@ pipeline {
             )
           )
 
-          set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
+          rem PATH con sdk tools
+          set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
+
           echo y | sdkmanager.bat --licenses
           echo y | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
         '''
@@ -69,7 +88,9 @@ pipeline {
     stage('Crear AVD (si no existe)') {
       steps {
         bat '''
-          set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
+          set "JAVA_HOME=%CD%\\.tools\\jdk17"
+          set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
+
           for /f "tokens=*" %%A in ('avdmanager.bat list avd ^| findstr /C:"Name: %AVD_NAME%"') do set FOUND=1
           if not defined FOUND (
             echo no | avdmanager.bat create avd -n "%AVD_NAME%" -k "%SYSTEM_IMAGE%" --device "%DEVICE_PROFILE%" --sdcard 2048M
@@ -185,11 +206,14 @@ pipeline {
       script {
         if (env.WORKSPACE) {
           bat '''
-            "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
-            "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
-
-            taskkill /F /IM node.exe /T 2>nul
-            "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
+            if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
+              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png || echo ok
+              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul || echo ok
+              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul || echo ok
+            ) else (
+              echo No hay adb (SDK fallido); omitiendo screencap y kill.
+            )
+            taskkill /F /IM node.exe /T 2>nul || echo ok
           '''
           archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
           script {
