@@ -2,7 +2,7 @@ Feature: Historia clinica - Completar Datos personales exitosamente
   Background: Aplicacion abierta
     Given aplicación está abierta
 
-    Scenario:  Ingresar datos pérsonales -> editar ocupacion y domicilio
+    Scenario:  Editar domicilio -> editar ocupacion y domicilio 
       Then presionar boton sing in
       When ingresar el usuario y la contraseña registrados
       And presionar boton ingresar

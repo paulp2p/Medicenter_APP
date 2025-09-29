@@ -1,72 +1,69 @@
 @echo off
 SETLOCAL
 
-rem ================== RUTAS Y VARIABLES ==================
-set PROJECT_DIR=C:\Users\paulr\SILTIUM\Medicenter_APP
-set VENV_DIR=%PROJECT_DIR%\venv
-set SDK_PATH=%LOCALAPPDATA%\Android\Sdk
+:: Ruta del SDK
+set SDK_PATH=C:\Users\paulr\AppData\Local\Android\Sdk
 
-rem APK y AVD
-set APK_PATH=%PROJECT_DIR%\apk\medicenter_app.apk
+:: Ruta de la APK
+set APK_PATH=C:\Users\paulr\SILTIUM\Medicenter_APP\apk\medicenter_app.apk
+
+:: Nombre del AVD
 set AVD_NAME=medicenter_avd
 
-rem Puertos/URLs
-set MOCK_HOST=0.0.0.0
-set MOCK_PORT=8081
-set MOCK_URL=http://127.0.0.1:%MOCK_PORT%
-
-rem Appium (puede ser solo "appium" si ya está en PATH)
-set APPIUM_CMD=appium
-
 echo ============================================
-echo  Iniciando emulador, Appium y Mock SMS...
+echo  Iniciando emulador y Appium en STAGING...
 echo ============================================
 echo.
 
-rem ================== 1) MOCK SMS ==================
-echo Iniciando Mock SMS en %MOCK_URL% ...
-start "Mock SMS" cmd /k "cd /d %PROJECT_DIR% && call %VENV_DIR%\Scripts\activate.bat && python -m uvicorn mock_sms:app --host %MOCK_HOST% --port %MOCK_PORT%"
-
-rem ================== 2) EMULADOR ==================
+:: Iniciar emulador con optimizaciones
 echo Iniciando emulador %AVD_NAME%...
-start "Emulator" "%SDK_PATH%\emulator\emulator.exe" -avd %AVD_NAME% -no-boot-anim -no-snapshot -no-audio -camera-back none -camera-front none -gpu swiftshader_indirect -netfast -accel on
+start "" "%SDK_PATH%\emulator\emulator.exe" -avd %AVD_NAME% -no-boot-anim -no-snapshot -no-audio -camera-back none -camera-front none -gpu swiftshader_indirect -netfast -accel on
 
+:: Esperar a que el emulador esté conectado
 echo Esperando a que el emulador se conecte...
 :wait_for_device
-"%SDK_PATH%\platform-tools\adb.exe" get-state | findstr /C:"device" >nul
+%SDK_PATH%\platform-tools\adb.exe get-state | findstr /C:"device" >nul
 IF ERRORLEVEL 1 (
     timeout /t 2 >nul
     goto wait_for_device
 )
+
 echo Emulador conectado.
 
-"%SDK_PATH%\platform-tools\adb.exe" wait-for-device
+:: Esperar a que el sistema Android termine de arrancar
+%SDK_PATH%\platform-tools\adb.exe wait-for-device
 
 :check_boot
-"%SDK_PATH%\platform-tools\adb.exe" shell getprop sys.boot_completed | findstr "1" >nul
+%SDK_PATH%\platform-tools\adb.exe shell getprop sys.boot_completed | findstr "1" >nul
 IF ERRORLEVEL 1 (
     timeout /t 2 >nul
     goto check_boot
 )
+
 echo Android ha arrancado completamente.
 
+:: Desactivar animaciones para mejorar velocidad
 echo Desactivando animaciones...
-"%SDK_PATH%\platform-tools\adb.exe" shell settings put global window_animation_scale 0
-"%SDK_PATH%\platform-tools\adb.exe" shell settings put global transition_animation_scale 0
-"%SDK_PATH%\platform-tools\adb.exe" shell settings put global animator_duration_scale 0
+%SDK_PATH%\platform-tools\adb.exe shell settings put global window_animation_scale 0
+%SDK_PATH%\platform-tools\adb.exe shell settings put global transition_animation_scale 0
+%SDK_PATH%\platform-tools\adb.exe shell settings put global animator_duration_scale 0
 
-echo Instalando APK (si cambia, se re-instala)...
-"%SDK_PATH%\platform-tools\adb.exe" install -r "%APK_PATH%"
+:: Instalar APK
+echo Instalando APK...
+%SDK_PATH%\platform-tools\adb.exe install -r "%APK_PATH%"
 
-rem ================== 3) APPIUM ==================
+:: Iniciar servidor Appium
 echo Iniciando servidor Appium...
-start "Appium" cmd /k "%APPIUM_CMD%"
+start "" cmd /k appium
 
+:: Esperar unos segundos para que Appium termine de inicializar
 timeout /t 5 >nul
 
 echo ============================================
-echo  Todo listo. Mock SMS, Emulador y Appium en marcha.
-echo  Mock URL: %MOCK_URL%
+echo  Todo listo. Emulador y Appium en marcha.
 echo ============================================
+
+:: Pausa final (solo en desarrollo)
+pause
 
 ENDLOCAL

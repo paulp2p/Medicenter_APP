@@ -13,10 +13,10 @@ class Localizadores:
         "100%, 5/5 Complete your profile Validate your identity"
     ]
     # LOCALIZADORES DE MODULO  DE INICIO - SING IN -  CREATE ACCOUNT 
-    SLICE_1 = '//android.widget.FrameLayout[@resource-id="android:id/content"]/android.widget.FrameLayout/android.widget.FrameLayout/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View[2]'
-    SLICE_2 = '//android.widget.FrameLayout[@resource-id="android:id/content"]/android.widget.FrameLayout/android.widget.FrameLayout/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View[3]'
-    SLICE_3 = '//android.widget.FrameLayout[@resource-id="android:id/content"]/android.widget.FrameLayout/android.widget.FrameLayout/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View[4]'
-    SLICE_4 = '//android.widget.FrameLayout[@resource-id="android:id/content"]/android.widget.FrameLayout/android.widget.FrameLayout/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View[5]'
+    SLICE_1 = 'new UiSelector().className("android.view.View").instance(7)'
+    SLICE_2 = 'new UiSelector().className("android.view.View").instance(8)'
+    SLICE_3 = 'new UiSelector().className("android.view.View").instance(9)'
+    SLICE_4 = 'new UiSelector().className("android.view.View").instance(10)'
     
     # MODULO DE: PERFIL - OTRAS CUENTAS - CENTRO DE CUENTAS
     BTN_SIGN_IN = '//android.widget.Button[@content-desc="Sign in"]' 
@@ -96,9 +96,9 @@ class Localizadores:
     DELETE_ADDRESS = 'new UiSelector().text("Google Building 43, 43 Amphitheatre Pkwy, Mountain View, CA 94043, USA").instance(0)'
     # EDITAR DOMICILIO NUEVA DIRECCION
     BUSCADOR = 'new UiSelector().className("android.widget.EditText")'
-    INPUT_COUNTRY = 'new UiSelector().className("android.view.View").instance(7)'
+    INPUT_COUNTRY = 'new UiSelector().className("android.view.View").instance(15)'
     SELECT_PAIS = 'new UiSelector().description("Argentina")' 
-    INPUT_PROVINCE = 'new UiSelector().className("android.view.View").instance(9)'
+    INPUT_PROVINCE = 'new UiSelector().className("android.view.View").instance(13)'
     SELECT_PROVINCE = 'new UiSelector().description("Distrito federal (CABA)")'
     # USUAR RESIDENCIA POR CHECK BOX
     CLICK_EN_PANTALLA = 'new UiSelector().description("Place of residence *")'
@@ -132,7 +132,7 @@ class Localizadores:
     ESCRIBIR_ALERGIA = 'new UiSelector().className("android.widget.EditText")'
     BTN_GUARDAR_INF_SALUD = 'new UiSelector().description("Save changes")'
     # LOCALIZADORES DE MODULO CARPETAS 
-    BTN_MAS = 'new UiSelector().className("android.widget.ImageView").instance(13)' 
+    BTN_MAS = '//android.widget.FrameLayout[@resource-id="android:id/content"]/android.widget.FrameLayout/android.widget.FrameLayout/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View/android.view.View/android.widget.ImageView' 
     NEW_FOLDER = '//android.widget.FrameLayout[@resource-id="android:id/content"]/android.widget.FrameLayout/android.widget.FrameLayout/android.view.View/android.view.View/android.view.View[1]/android.view.View/android.view.View'
     NOMBRE_DE_CARPETA = '//android.widget.EditText' #xpath
     BTN_CREAR_CARPETA = '//android.widget.Button[@content-desc="Create"]' #xpath

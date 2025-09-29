@@ -24,7 +24,11 @@ class CuentaPage:
 
     # ------------------------------------------------------------- editar_username
     def editar_username_de_informacion_de_cuenta(self):
-        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        self.funciones.validar_elemento_presente_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        uia = 'new UiSelector().className("android.widget.ImageView").instance(6)'
+        el = self.driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, uia)
+        self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+        self.funciones.click_fab_plus()
         self.funciones.borrar_input_con_teclado('new UiSelector().text("danielruiz")')
         self.funciones.escribir_por_uiautomator('new UiSelector().className("android.widget.EditText").instance(0)', "grelbelgrano")
         self.funciones.clickear_por_uiautomator('new UiSelector().description("Save changes")')
@@ -34,14 +38,22 @@ class CuentaPage:
         self.funciones.capturar_imagen_por_uiautomator('new UiSelector().description("Username:")', 'cambio de username')
 
     def volver_al_username_original(self):
-        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        self.funciones.validar_elemento_presente_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        uia = 'new UiSelector().className("android.widget.ImageView").instance(6)'
+        el = self.driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, uia)
+        self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+        self.funciones.click_fab_plus()
         self.funciones.borrar_input_con_teclado('new UiSelector().text("grelbelgrano")')
         self.funciones.escribir_por_uiautomator('new UiSelector().className("android.widget.EditText").instance(0)', "danielruiz")
         self.funciones.clickear_por_uiautomator('new UiSelector().description("Save changes")')
 
     # ------------------------------------------------------------- 
     def editar_email_de_informacion_de_cuenta(self):
-        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        self.funciones.validar_elemento_presente_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        uia = 'new UiSelector().className("android.widget.ImageView").instance(6)'
+        el = self.driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, uia)
+        self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+        self.funciones.click_fab_plus()
         self.funciones.esperar_elemento_visible('new UiSelector().description("Edit account information")', timeout=6)
         self.funciones.borrar_input('new UiSelector().text("blussp@gmail.com")')
         self.funciones.escribir_por_uiautomator('new UiSelector().className("android.widget.EditText").instance(1)', "test1@gmail.com")
@@ -68,13 +80,21 @@ class CuentaPage:
 
     # ------------------------------------------------------------- 
     def opciones_de_foto_perfil(self):
-        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
-        self.funciones.esperar_elemento_visible('new UiSelector().description("Edit account information")', timeout=6)
+        self.funciones.validar_elemento_presente_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        uia = 'new UiSelector().className("android.widget.ImageView").instance(6)'
+        el = self.driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, uia)
+        self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+        self.funciones.click_fab_plus()
+
+        self.funciones.esperar_elemento_visible('new UiSelector().description("Edit account information")',3)
+        time.sleep(1)
         self.funciones.click_por_coordenadas(300, 500)
+        self.funciones.esperar_elemento_visible('com.android.permissioncontroller:id/permission_allow_button')
+        self.funciones.clickear_por_id('com.android.permissioncontroller:id/permission_allow_button')
         time.sleep(2)
         self.funciones.click_por_coordenadas(200, 2080)
         time.sleep(2)
-        self.funciones.clickear_por_xpath('//android.widget.ImageView[@resource-id="com.google.android.documentsui:id/icon_thumb"]','imagen selecionada')
+        self.funciones.click_por_coordenadas(200, 800)
         time.sleep(2)
         self.funciones.click_por_coordenadas(1010, 200)
 
@@ -86,20 +106,29 @@ class CuentaPage:
 
     # ------------------------------------------------------------- 
     def eliminar_imagen_de_perfil(self):
-        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
-        time.sleep(2)
+        self.funciones.validar_elemento_presente_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        uia = 'new UiSelector().className("android.widget.ImageView").instance(6)'
+        el = self.driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, uia)
+        self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+        self.funciones.click_fab_plus()
+        time.sleep(1)
         self.funciones.click_por_coordenadas(300, 500)
-        self.funciones.esperar_elemento_visible('//android.widget.Button[@content-desc="Crop"]', timeout=6)
+        self.funciones.esperar_elemento_visible('//android.widget.Button[@content-desc="Crop"]', 3)
         self.funciones.click_por_coordenadas(280, 2090)
-        self.funciones.esperar_elemento_visible('new UiSelector().description("Save changes")', 6)
+        self.funciones.esperar_elemento_visible('new UiSelector().description("Save changes")', 3)
         self.funciones.clickear_por_uiautomator('new UiSelector().description("Save changes")')
 
     def screen_shot_imagen_de_perfil(self):
-        self.funciones.esperar_elemento_visible(AppiumBy.XPATH, '//android.widget.ScrollView/android.widget.ImageView[1]', 6, 'imagen de perfil eliminada')
+        self.funciones.esperar_elemento_visible('//android.widget.ScrollView/android.widget.ImageView[1]', 3)
 
     # ------------------------------------------------------------- 
     def campos_obligatorios(self):
-        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        self.funciones.validar_elemento_presente_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
+        uia = 'new UiSelector().className("android.widget.ImageView").instance(6)'
+        el = self.driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, uia)
+        self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+        self.funciones.click_fab_plus()
+        #self.funciones.clickear_por_uiautomator('new UiSelector().className("android.widget.ImageView").instance(6)')
         self.funciones.esperar_elemento_visible('new UiSelector().description("Edit account information")', timeout=6)
         self.funciones.borrar_input_con_teclado('new UiSelector().text("danielruiz")')
         self.funciones.borrar_input_con_teclado('new UiSelector().text("blussp@gmail.com")')
@@ -108,8 +137,8 @@ class CuentaPage:
 
     def validar_mensaje_alerta_de_campos_obligatorios(self):
         time.sleep(0.5)
-        self.funciones.esperar_elemento_visible(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().description("Required field").instance(0)', 3, 'alerta campo usuario requerido')
-        self.funciones.esperar_elemento_visible(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().description("Required field").instance(1)', 3, 'alerta campo mail requerido')
+        self.funciones.esperar_elemento_visible('new UiSelector().description("Required field").instance(0)', 3, 'alerta campo usuario requerido')
+        self.funciones.esperar_elemento_visible('new UiSelector().description("Required field").instance(1)')
         self.funciones.clickear_por_uiautomator('new UiSelector().description("Edit account information")')
         self.funciones.clickear_por_xpath('//android.widget.Button[@content-desc="Ok"]')
 

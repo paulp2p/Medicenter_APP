@@ -62,44 +62,46 @@ class Historia_clinica:
         self.funciones.clickear_por_uiautomator(vl.BTN_VER_MAS,"boton ver mas - carpeta de historia clinica")
         self.funciones.validar_elemento_presente_uiautomator('new UiSelector().description("Medical record")')
     
-    def click_en_editar_datos_personales(self):
-        self.funciones.clickear_por_uiautomator(vl.BTN_EDITAR_DATOS_PERSONALES, "boton editar datos personales")
+    def click_en_editar_datos_personales(self):####################################################008
+        self.funciones.clickear_por_uiautomator(vl.BTN_EDITAR_DATOS_PERSONALES)
 
     def ocupacion_random(self):
         return random.choice(self.ocupaciones)
 
-    def editar_datos_personales(self):
-        self.funciones.borrar_input_total(vl.INPUT_OCUPACION)#*
+    def editar_datos_personales(self):#############################################################008
+        self.funciones.validar_elemento_presente_uiautomator(vl.INPUT_OCUPACION)
+        self.funciones.borrar_input_text_uia(vl.INPUT_OCUPACION)
         ocupacion = self.ocupacion_random()
         self.funciones.escribir_por_uiautomator(vl.BUSCADOR, ocupacion)
         self.funciones.clickear_por_uiautomator('new UiSelector().description("Gender")')
 
-    def borrar_datos_de_domicilio(self):
+    def borrar_datos_de_domicilio(self):#############################################################008
         self.funciones.clickear_por_uiautomator(vl.DELETE_COUNTRY_POPUP)
+        self.funciones.scroll_hasta_elemento(vl.DELETE_OTHER_COUNTRY)
         self.funciones.clickear_por_uiautomator(vl.DELETE_OTHER_COUNTRY)
-        self.funciones.borrar_input_total(vl.DELETE_ADDRESS)#*
-        time.sleep(1)
-        self.funciones.borrar_input_total(vl.DELETE_ADDRESS)#*
+        self.funciones.borrar_input_text_uia('new UiSelector().text("Google Building 40, 1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA").instance(0)')
+        self.funciones.scroll_hasta_elemento('new UiSelector().text("Google Building 40, 1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA").instance(1)')
+        self.funciones.borrar_input_text_uia('new UiSelector().text("Google Building 40, 1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA").instance(1)')
         self.funciones.clickear_por_uiautomator('new UiSelector().description("Place of birth *")')
         
-
     def seleccionar_ubicacion(self):
         self.funciones.clickear_por_uiautomator(vl.DELETE_COUNTRY_POPUP)
         self.funciones.clickear_por_uiautomator(vl.UBICACION_ACTUAL)
         self.funciones.clickear_por_uiautomator(vl.CLICK_EN_PANTALLA, "GUARDANDO DIRECCION NUEVA")
-        self.funciones.scroll_hasta_elemento(vl.CHECK_BOX_RESIDENCE)
+        self.funciones.scroll_hasta_elemento(vl.CHECK_BOX_RESIDENCE,1)
         self.funciones.clickear_por_uiautomator(vl.CHECK_BOX_RESIDENCE)
 
-    def seleccionar_pais_datos_personales(self):
+    def seleccionar_pais_datos_personales(self):#############################################################008
         #self.funciones.clickear_por_uiautomator(vl.DELETE_COUNTRY_POPUP)
-        self.funciones.clickear_por_uiautomator(vl.INPUT_COUNTRY)
+        self.funciones.clickear_por_uiautomator('new UiSelector().className("android.view.View").instance(14)')
         self.funciones.escribir_por_uiautomator(vl.BUSCADOR, "argentina")
         self.funciones.clickear_por_uiautomator(vl.SELECT_PAIS)
+        self.funciones.escribir_por_uiautomator('new UiSelector().className("android.widget.EditText").instance(1)', 'malvinas argentinas')
 
     def direccion_random(self):
         return random.choice(self.direcciones)
 
-    def seleccionar_provincia_detos_personales(self): #006-feature
+    def seleccionar_provincia_detos_personales(self): #############################################################008
         self.funciones.clickear_por_uiautomator(vl.INPUT_PROVINCE)
         self.funciones.escribir_por_uiautomator(vl.BUSCADOR, "Distrito Federal (CABA)")
         self.funciones.clickear_por_uiautomator(vl.SELECT_PROVINCE)
@@ -110,12 +112,12 @@ class Historia_clinica:
 
     def eliminar_datos_personales(self):
         self.funciones.clickear_por_uiautomator(vl.DELETE_COUNTRY_POPUP)
-        self.funciones.scroll_hasta_elemento(vl.DELETE_OTHER_COUNTRY)
+        self.funciones.scroll_hasta_elemento(vl.DELETE_OTHER_COUNTRY,1)
         self.funciones.clickear_por_uiautomator(vl.DELETE_OTHER_COUNTRY)
 
     def eliminar_info_de_domicilio(self): #9
         self.funciones.clickear_por_uiautomator(vl.DELETE_COUNTRY_POPUP)
-        self.funciones.scroll_hasta_elemento(vl.DELETE_OTHER_COUNTRY)
+        self.funciones.scroll_hasta_elemento(vl.DELETE_OTHER_COUNTRY,1)
         self.funciones.clickear_por_uiautomator(vl.DELETE_OTHER_COUNTRY)
 
     def click_en_salir_editar_datos_personales(self): #9

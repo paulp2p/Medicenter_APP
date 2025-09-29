@@ -22,7 +22,7 @@ def step_impl(context):
 def step_impl(context):
     context.historia_clinica_page.click_en_editar_datos_personales()
 
-@when(u'completar datos personales') #006-feature
+@when(u'completar datos personales') #008-feature
 def step_impl(context):
     context.historia_clinica_page.editar_datos_personales()
     context.historia_clinica_page.borrar_datos_de_domicilio()

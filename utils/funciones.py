@@ -1,6 +1,12 @@
 import json
 import os
 import random
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    ElementClickInterceptedException,
+    WebDriverException,
+)
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
@@ -9,6 +15,10 @@ import allure
 from appium.webdriver.common.touch_action import TouchAction
 from allure_commons.types import AttachmentType
 import time
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.actions.action_builder import ActionBuilder
+from selenium.webdriver.common.actions import interaction
+from selenium.webdriver.common.actions.pointer_input import PointerInput
 
 t = 0.5
 
@@ -126,28 +136,23 @@ class Funciones:
             print(f"[!] No se encontró la imagen con ACCESSIBILITY_ID: {id}")
             return False
 
-    def click_y_screenshot_por_xpath(self, xpath, nombre_screenshot="click_elemento", reintentos=2):
-        for intento in range(reintentos):
-            try:
-                elemento = self.wait.until(EC.presence_of_element_located((AppiumBy.XPATH, xpath)))
-                if elemento.is_displayed() or elemento.is_enabled():
-                    elemento.click()
-                    time.sleep(0.5)
-                    self.tomar_screenshot(nombre_screenshot)
-                    return True
-                else:
-                    self.tomar_screenshot(f"{nombre_screenshot}_no_interactuable")
-                    print(f"[!] Elemento encontrado pero no interactuable: {xpath}")
-                    return False
-            except StaleElementReferenceException:
-                print(f"[WARN] Elemento stale, reintentando ({intento + 1}/{reintentos})...")
-                time.sleep(1)
-            except TimeoutException:
-                self.tomar_screenshot(f"{nombre_screenshot}_no_encontrado")
-                print(f"[!] No se encontró el elemento con XPATH: {xpath}")
-                return False
-        print(f"[!] Falló después de {reintentos} intentos por StaleElement.")
-        return False
+    def click_y_screenshot_por_UIAUTOMATOR(self, ui_selector: str, nombre_screenshot: str = "click_elemento") -> bool:
+        try:
+            el = WebDriverWait(self.driver, 5).until(
+                EC.visibility_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, ui_selector))
+            )
+            el.click()
+            time.sleep(0.5)
+            self.tomar_screenshot(nombre_screenshot)
+            return True
+        except TimeoutException:
+            self.tomar_screenshot(f"{nombre_screenshot}_no_visible")
+            print(f"[!] No se encontró visible en 5s: {ui_selector}")
+            return False
+        except Exception as e:
+            self.tomar_screenshot(f"{nombre_screenshot}_error_click")
+            print(f"[ERROR] Falló el click: {e}")
+            return False
 
     def validar_y_clickear_por_xpath(self, xpath, nombre_screenshot="click_elemento", reintentos=2):
         for intento in range(reintentos):
@@ -218,6 +223,22 @@ class Funciones:
             print(f"[!] No se encontró un elemento con description que contenga: {texto_constante}")
             return False
         
+    def validar_elemento_presente_id(self, texto_constante, nombre_screenshot="validacion_por_description"):
+        time.sleep(3)
+        try:
+            self.wait.until(
+                EC.presence_of_element_located((
+                    AppiumBy.ACCESSIBILITY_ID,
+                    f'new UiSelector().descriptionContains("{texto_constante}")'
+                ))
+            )
+            screenshot = self.driver.get_screenshot_as_png()
+            allure.attach(screenshot, name=nombre_screenshot, attachment_type=AttachmentType.PNG)
+            return True
+        except TimeoutException:
+            print(f"[!] No se encontró un elemento con description que contenga: {texto_constante}")
+            return False
+        
     def esperar_elemento_visible(self, ui_selector: str, timeout: int = 10, nombre_screenshot: str | None = None):
         """
         Espera a que un elemento (ANDROID_UIAUTOMATOR) esté visible (displayed) o habilitado (enabled).
@@ -256,7 +277,7 @@ class Funciones:
             return None
 
     def validar_elemento_presente_xpath(self, xpath, nombre_screenshot="validacion_por_xpath"):
-        time.sleep(3)
+        time.sleep(2)
         try:
             self.wait.until(EC.presence_of_element_located((AppiumBy.XPATH, xpath)))
             screenshot = self.driver.get_screenshot_as_png()
@@ -362,6 +383,54 @@ class Funciones:
                 time.sleep(0.05)
         except Exception as e:
             print(f"[ERROR] al borrar input con teclado: {e}")
+            
+    def _click_via_gesture(self, el):
+        """Click robusto usando el gesto nativo del driver."""
+        try:
+            self.driver.execute_script("mobile: clickGesture", {"elementId": el.id})
+            return True
+        except Exception as e:
+            print(f"[WARN] clickGesture falló: {e}")
+            # fallback W3C
+            try:
+                cx, cy = self._center(el)
+                actions = ActionChains(self.driver)
+                actions.w3c_actions = ActionBuilder(self.driver, mouse=PointerInput(interaction.POINTER_TOUCH, "finger"))
+                actions.w3c_actions.pointer_action.move_to_location(cx, cy)
+                actions.w3c_actions.pointer_action.pointer_down()
+                actions.w3c_actions.pointer_action.pause(0.03)
+                actions.w3c_actions.pointer_action.pointer_up()
+                actions.perform()
+                return True
+            except Exception as e2:
+                print(f"[ERROR] fallback W3C también falló: {e2}")
+                return False
+    
+    def click_fab_plus(self):
+        """
+        Encuentra y toca el FAB (+) aunque no tenga content-desc.
+        Estrategia:
+        1) Buscar candidatos por content-desc comunes (Add/Create/New)
+        2) Si no hay, tomar un ImageView clickable en el cuadrante inferior derecho
+            (típico de FAB) y hacer clickGesture sobre él.
+        """
+        # 1) heurísticas por content-desc comunes
+        try:
+            for locator in [
+                (AppiumBy.ACCESSIBILITY_ID, "Add"),
+                (AppiumBy.ACCESSIBILITY_ID, "Create"),
+                (AppiumBy.ACCESSIBILITY_ID, "New"),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Add")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("Create")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().descriptionContains("New")'),
+            ]:
+                els = self.driver.find_elements(*locator)
+                for el in els:
+                    if el.is_displayed() and el.is_enabled():
+                        if self._click_via_gesture(el):
+                            return True
+        except Exception:
+            pass
 
     def borrar_input_y_capturar(self, locator_uiautomator):
         try:
@@ -646,3 +715,114 @@ class Funciones:
             print(f"[WARN] No se pudo persistir la elección: {e}")
 
         return elegido["desc"]
+    
+    def borrar_input_text_uia(self, ui_selector: str, nombre_screenshot: str = "edittext_borrado") -> bool:
+        # 0) localizar y enfocar
+        try:
+            el = WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((AppiumBy.ANDROID_UIAUTOMATOR, ui_selector))
+            )
+            el.click()
+            for _ in range(2):
+                if (el.get_attribute("focused") or "").lower() == "true":
+                    break
+                el.click()
+                time.sleep(0.05)
+        except TimeoutException:
+            self.tomar_screenshot(f"{nombre_screenshot}_no_encontrado")
+            print(f"[!] No se encontró el EditText en 5s: {ui_selector}")
+            return False
+
+        def _txt():
+            try:
+                return el.text or el.get_attribute("text") or ""
+            except Exception:
+                return ""
+
+        # 1) clear()
+        try:
+            el.clear()
+            time.sleep(0.05)
+        except Exception:
+            pass
+        if _txt() == "":
+            self.tomar_screenshot(nombre_screenshot)
+            return True
+
+        # 2) set_value("")
+        try:
+            el.set_value("")      # reemplazo directo si el driver lo soporta
+            time.sleep(0.05)
+        except Exception:
+            pass
+        if _txt() == "":
+            self.tomar_screenshot(nombre_screenshot)
+            return True
+
+        # 3) long-press -> Select all / Seleccionar todo -> DEL
+        try:
+            self.driver.execute_script("mobile: longClickGesture", {"elementId": el.id, "duration": 600})
+            for label in ("Select all", "Seleccionar todo"):
+                try:
+                    btn = self.driver.find_element(
+                        AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{label}")'
+                    )
+                    btn.click()
+                    break
+                except Exception:
+                    continue
+            # borrar selección completa
+            self.driver.press_keycode(67)  # DEL
+            time.sleep(0.05)
+        except Exception:
+            pass
+        if _txt() == "":
+            self.tomar_screenshot(nombre_screenshot)
+            return True
+
+        # 4) Borrado bruto: ir al final y DEL hasta vaciar (tope prudente)
+        try:
+            self.driver.press_keycode(123)  # MOVE_END
+            last, stable = None, 0
+            for _ in range(400):
+                t = _txt()
+                if t == "":
+                    break
+                self.driver.press_keycode(67)   # DEL
+                time.sleep(0.01)
+                if t == last:
+                    stable += 1
+                    if stable > 25:  # no cambia -> cortar
+                        break
+                else:
+                    stable, last = 0, t
+        except Exception:
+            pass
+        if _txt() == "":
+            self.tomar_screenshot(nombre_screenshot)
+            return True
+
+        # 5) Ir al inicio y FORWARD_DEL hasta vaciar
+        try:
+            self.driver.press_keycode(122)  # MOVE_HOME
+            last, stable = None, 0
+            for _ in range(400):
+                t = _txt()
+                if t == "":
+                    break
+                self.driver.press_keycode(112)  # FORWARD_DEL
+                time.sleep(0.01)
+                if t == last:
+                    stable += 1
+                    if stable > 25:
+                        break
+                else:
+                    stable, last = 0, t
+        except Exception:
+            pass
+
+        vacio = (_txt() == "")
+        self.tomar_screenshot(nombre_screenshot if vacio else f"{nombre_screenshot}_incompleto")
+        if not vacio:
+            print("[WARN] El campo no quedó totalmente vacío después de todos los intentos.")
+        return vacio
