@@ -1,10 +1,10 @@
 pipeline {
-  agent { label 'windows' } // o: agent any
+  agent any
 
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '15'))
-    timeout(time: 60, unit: 'MINUTES')
+    timeout(time: 120, unit: 'MINUTES')  // primera corrida puede tardar
   }
 
   parameters {
@@ -12,6 +12,7 @@ pipeline {
   }
 
   environment {
+    // --- SDK/AVD en workspace (sin admin) ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
@@ -19,25 +20,30 @@ pipeline {
     SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
     DEVICE_PROFILE   = "pixel_5"
 
+    // --- Appium / Python ---
     PYTHON           = "python"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
     APP              = "app\\medicenter_app.apk"
 
+    // --- Zona horaria ---
     TZ               = "America/Argentina/Buenos_Aires"
 
+    // --- rclone / Drive ---
     GDRIVE_REMOTE    = "gdrive"
     APK_DRIVE_PATH   = "CI/medicenter_app.apk"
     APK_LOCAL_PATH   = "app\\medicenter_app.apk"
   }
 
   stages {
+
     stage('Checkout') {
       steps { checkout scm }
     }
 
     stage('Android SDK & cmdline-tools') {
+      options { timeout(time: 35, unit: 'MINUTES') }
       steps {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
@@ -100,6 +106,7 @@ pipeline {
     }
 
     stage('Iniciar Emulador') {
+      options { timeout(time: 20, unit: 'MINUTES') }
       steps {
         bat '''
           set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
@@ -129,6 +136,7 @@ pipeline {
     }
 
     stage('Appium + Dependencias Python') {
+      options { timeout(time: 25, unit: 'MINUTES') }
       steps {
         bat '''
           where appium
@@ -174,18 +182,24 @@ pipeline {
 
   post {
     always {
-      bat '''
-        "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
-        "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png"
-
-        taskkill /F /IM node.exe /T 2>nul
-        "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
-      '''
-      archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
       script {
-        try {
-          allure includeProperties: false, jdk: '', results: [[path: 'reports/allure-results']]
-        } catch (ignored) { }
+        if (env.WORKSPACE) {
+          bat '''
+            "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
+            "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
+
+            taskkill /F /IM node.exe /T 2>nul
+            "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
+          '''
+          archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
+          script {
+            try {
+              allure includeProperties: false, jdk: '', results: [[path: 'reports/allure-results']]
+            } catch (ignored) { }
+          }
+        } else {
+          echo 'Sin WORKSPACE (no se asignó nodo). Omitiendo cleanup/artefactos.'
+        }
       }
     }
   }
