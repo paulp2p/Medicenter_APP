@@ -4,7 +4,7 @@ pipeline {
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '15'))
-    timeout(time: 120, unit: 'MINUTES') // primera vez puede tardar
+    timeout(time: 120, unit: 'MINUTES')
   }
 
   parameters {
@@ -12,7 +12,6 @@ pipeline {
   }
 
   environment {
-    // --- ANDROID SDK / AVD ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
@@ -20,45 +19,36 @@ pipeline {
     SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
     DEVICE_PROFILE   = "pixel_5"
 
-    // --- Appium / Python ---
     PYTHON           = "python"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
 
-    // --- APK ---
     GDRIVE_REMOTE  = "gdrive"
     APK_DRIVE_PATH = "CI/medicenter_app.apk"
     APK_LOCAL_PATH = "app\\medicenter_app.apk"
     APP            = "app\\medicenter_app.apk"
 
-    // --- Otros ---
     TZ = "America/Argentina/Buenos_Aires"
   }
 
   stages {
 
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Verificar Java 17') {
       steps {
         bat '''
           setlocal
-          if defined JAVA17_HOME (
-            echo JAVA17_HOME=%JAVA17_HOME%
-            "%JAVA17_HOME%\\bin\\java.exe" -version
-          ) else (
+          if not defined JAVA17_HOME (
             for /d %%D in ("C:\\Program Files\\Eclipse Adoptium\\jdk-17*") do set "JAVA17_HOME=%%D"
-            if defined JAVA17_HOME (
-              echo Detectado JAVA17_HOME=%JAVA17_HOME%
-              "%JAVA17_HOME%\\bin\\java.exe" -version
-            ) else (
-              echo ERROR: No se encontro un JDK 17. Definilo como JAVA17_HOME o instala Temurin 17.
-              exit /b 1
-            )
           )
+          if not defined JAVA17_HOME (
+            echo ERROR: No se encontro un JDK 17. Define JAVA17_HOME o instala Temurin 17.
+            exit /b 1
+          )
+          echo JAVA17_HOME=%JAVA17_HOME%
+          "%JAVA17_HOME%\\bin\\java.exe" -version
         '''
       }
     }
@@ -69,12 +59,11 @@ pipeline {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
 
-          rem ==== Usar Java 17 para sdkmanager/avdmanager ====
-          if not defined JAVA17_HOME for /d %%D in ("C:\\Program Files\\Eclipse Adoptium\\jdk-17*") do set "JAVA17_HOME=%%D"
+          rem === Usar Java 17 para sdkmanager / avdmanager ===
           set "JAVA_HOME=%JAVA17_HOME%"
           set "PATH=%JAVA_HOME%\\bin;%PATH%"
 
-          rem ==== Instalar commandline-tools si falta ====
+          rem === cmdline-tools ===
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
             cd /d "%ANDROID_SDK_ROOT%\\cmdline-tools"
@@ -86,10 +75,14 @@ pipeline {
             )
           )
 
-          rem ==== Instalar paquetes del SDK ====
+          rem === PATH del SDK + JDK 17 ===
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
-          echo y | sdkmanager.bat --licenses
-          echo y | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
+
+          rem === Aceptar licencias (Windows, robusto) ===
+          ( for /L %%n in (1,1,20) do @echo y ) | sdkmanager.bat --licenses
+
+          rem === Instalar paquetes necesarios ===
+          ( for /L %%n in (1,1,20) do @echo y ) | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
         '''
       }
     }
@@ -214,23 +207,22 @@ pipeline {
     always {
       script {
         if (env.WORKSPACE) {
-          // no rompas el build si el cleanup falla
+          // Limpieza que nunca rompe el build si falla
           bat(returnStatus: true, script: '''
             if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
               "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
               "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
               "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
-            ) else (
+            )
+            if not exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
               echo No hay adb (SDK fallido); omitiendo screencap y kill.
             )
             taskkill /F /IM node.exe /T 2>nul
           ''')
           archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
-          script {
-            try { allure includeProperties: false, jdk: '', results: [[path: 'reports/allure-results']] } catch (ignored) { }
-          }
-        } else {
-          echo 'Sin WORKSPACE (no se asignó nodo). Omitiendo cleanup/artefactos.'
+
+          // Si más adelante instalas el plugin Allure, podemos publicar acá.
+          // Por ahora, eliminado para evitar el error "No such DSL method 'allure'".
         }
       }
     }
