@@ -130,33 +130,51 @@ pipeline {
         }
 
     stage('Iniciar Emulador') {
-      options { timeout(time: 20, unit: 'MINUTES') }
-      steps {
-        bat '''
-          set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
+        options { timeout(time: 25, unit: 'MINUTES') } // subimos un poco el margen
+        steps {
+            bat '''
+            setlocal ENABLEDELAYEDEXPANSION
+            set "ADB=%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe"
+            set "EMU=%ANDROID_SDK_ROOT%\\emulator\\emulator.exe"
 
-          start /B "" "%ANDROID_SDK_ROOT%\\emulator\\emulator.exe" -avd "%AVD_NAME%" ^
-            -no-window -no-boot-anim -gpu swiftshader_indirect -timezone "%TZ%" -no-snapshot -memory 3072 -netfast ^
-            1> emulator.log 2>&1
+            rem --- PATH básico ---
+            set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-          "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" wait-for-device
+            rem --- Lanzar emulador en background y loguear ---
+            start /B "" "%EMU%" -avd "%AVD_NAME%" ^
+                -no-window -no-boot-anim -gpu swiftshader_indirect -timezone "%TZ%" -no-snapshot -memory 3072 -netfast ^
+                1> emulator.log 2>&1
 
-          set BOOTED=
-          for /L %%i in (1,1,120) do (
-            for /f "usebackq tokens=* delims=" %%b in (`"%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell getprop sys.boot_completed 2^>NUL`) do set BOOTED=%%b
-            if "%%BOOTED%%"=="1" goto :bootok
-            timeout /t 5 >nul
-          )
-          :bootok
+            rem --- Esperar a que ADB vea el dispositivo ---
+            "%ADB%" wait-for-device
 
-          "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell input keyevent 82
-          "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell settings put global window_animation_scale 0
-          "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell settings put global transition_animation_scale 0
-          "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell settings put global animator_duration_scale 0
+            rem --- Esperar boot completo y PackageManager listo ---
+            set BOOT=
+            set DEV=
+            for /L %%i in (1,1,180) do (
+                set BOOT=
+                set DEV=
+                for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop sys.boot_completed 2^>NUL`) do set BOOT=%%b
+                for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop dev.bootcomplete 2^>NUL`) do set DEV=%%b
 
-          if exist "%APP%" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" install -r "%APP%"
-        '''
-      }
+                if "!BOOT!"=="1" if "!DEV!"=="1" (
+                "%ADB%" shell pm list packages 1>nul 2>&1
+                if !ERRORLEVEL! EQU 0 goto :pm_ready
+                )
+                timeout /t 3 >nul
+            )
+            :pm_ready
+
+            rem --- Desactivar animaciones (acelera UI tests) ---
+            "%ADB%" shell input keyevent 82
+            "%ADB%" shell settings put global window_animation_scale 0
+            "%ADB%" shell settings put global transition_animation_scale 0
+            "%ADB%" shell settings put global animator_duration_scale 0
+
+            rem --- Instalar la app si existe ---
+            if exist "%APP%" "%ADB%" install -r "%APP%"
+            '''
+        }
     }
 
     stage('Appium + Dependencias Python') {
