@@ -3,7 +3,6 @@ pipeline {
 
   options {
     timestamps()
-    ansiColor('xterm')
     buildDiscarder(logRotator(numToKeepStr: '15'))
     timeout(time: 60, unit: 'MINUTES')
   }
@@ -13,7 +12,6 @@ pipeline {
   }
 
   environment {
-    // --- SDK/AVD en workspace (sin admin) ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
@@ -21,24 +19,20 @@ pipeline {
     SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
     DEVICE_PROFILE   = "pixel_5"
 
-    // --- Appium / Python ---
     PYTHON           = "python"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
     APP              = "app\\medicenter_app.apk"
 
-    // --- Zona horaria ---
     TZ               = "America/Argentina/Buenos_Aires"
 
-    // --- rclone / Drive ---
     GDRIVE_REMOTE    = "gdrive"
     APK_DRIVE_PATH   = "CI/medicenter_app.apk"
     APK_LOCAL_PATH   = "app\\medicenter_app.apk"
   }
 
   stages {
-
     stage('Checkout') {
       steps { checkout scm }
     }
@@ -46,7 +40,7 @@ pipeline {
     stage('Android SDK & cmdline-tools') {
       steps {
         bat '''
-          setlocal ENABLEDELAYEDEXECUTION
+          setlocal ENABLEDELAYEDEXPANSION
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
 
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
