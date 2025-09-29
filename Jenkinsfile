@@ -4,14 +4,15 @@ pipeline {
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '15'))
-    timeout(time: 120, unit: 'MINUTES')
+    timeout(time: 120, unit: 'MINUTES') // primera vez puede tardar
   }
 
   parameters {
-    string(name: 'BEHAVE_TAGS', defaultValue: '', description: 'Etiquetas Behave, ej: @smoke o @regression')
+    string(name: 'BEHAVE_TAGS', defaultValue: '', description: 'Etiquetas Behave, ej.: @smoke o @regression')
   }
 
   environment {
+    // --- Android SDK / AVD ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
@@ -19,22 +20,27 @@ pipeline {
     SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
     DEVICE_PROFILE   = "pixel_5"
 
+    // --- Appium / Python ---
     PYTHON           = "python"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
 
+    // --- APK (Google Drive con rclone) ---
     GDRIVE_REMOTE  = "gdrive"
     APK_DRIVE_PATH = "CI/medicenter_app.apk"
     APK_LOCAL_PATH = "app\\medicenter_app.apk"
     APP            = "app\\medicenter_app.apk"
 
+    // --- Zona horaria ---
     TZ = "America/Argentina/Buenos_Aires"
   }
 
   stages {
 
-    stage('Checkout') { steps { checkout scm } }
+    stage('Checkout') {
+      steps { checkout scm }
+    }
 
     stage('Verificar Java 17') {
       steps {
@@ -59,11 +65,11 @@ pipeline {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
 
-          rem === Usar Java 17 para sdkmanager / avdmanager ===
+          rem === Usar Java 17 para sdkmanager/avdmanager ===
           set "JAVA_HOME=%JAVA17_HOME%"
           set "PATH=%JAVA_HOME%\\bin;%PATH%"
 
-          rem === cmdline-tools ===
+          rem === Instalar commandline-tools si falta ===
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
             cd /d "%ANDROID_SDK_ROOT%\\cmdline-tools"
@@ -78,11 +84,9 @@ pipeline {
           rem === PATH del SDK + JDK 17 ===
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
 
-          rem === Aceptar licencias (Windows, robusto) ===
-          ( for /L %%n in (1,1,20) do @echo y ) | sdkmanager.bat --licenses
-
-          rem === Instalar paquetes necesarios ===
-          ( for /L %%n in (1,1,20) do @echo y ) | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
+          rem === Aceptar licencias e instalar paquetes (robusto en Windows) ===
+          ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat --licenses
+          ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
         '''
       }
     }
@@ -102,100 +106,113 @@ pipeline {
     }
 
     stage('Fetch APK (rclone desde Drive)') {
-        steps {
-            withCredentials([string(credentialsId: 'RCLONE_CONF_B64', variable: 'RCLONE_CONF_B64')]) {
-            bat '''
-                if not exist ".tools" mkdir .tools
-                if not exist ".tools\\rclone.exe" (
-                curl -L -o rclone.zip https://downloads.rclone.org/rclone-current-windows-amd64.zip
-                powershell -NoProfile -Command "Expand-Archive -Force rclone.zip .tools\\rclone_zip"
-                for /r ".tools\\rclone_zip" %%F in (rclone.exe) do copy "%%F" ".tools\\rclone.exe" >nul
-                rmdir /s /q ".tools\\rclone_zip"
-                del rclone.zip
-                )
-                set "RCLONE_CMD=%CD%\\.tools\\rclone.exe"
+      steps {
+        withCredentials([string(credentialsId: 'RCLONE_CONF_B64', variable: 'RCLONE_CONF_B64')]) {
+          bat '''
+            if not exist ".tools" mkdir .tools
+            if not exist ".tools\\rclone.exe" (
+              curl -L -o rclone.zip https://downloads.rclone.org/rclone-current-windows-amd64.zip
+              powershell -NoProfile -Command "Expand-Archive -Force rclone.zip .tools\\rclone_zip"
+              for /r ".tools\\rclone_zip" %%F in (rclone.exe) do copy "%%F" ".tools\\rclone.exe" >nul
+              rmdir /s /q ".tools\\rclone_zip"
+              del rclone.zip
+            )
+            set "RCLONE_CMD=%CD%\\.tools\\rclone.exe"
 
-                rem === escribir config donde rclone lo espera en Windows ===
-                if not exist "%APPDATA%\\rclone" mkdir "%APPDATA%\\rclone"
-                powershell -NoProfile -Command "[IO.File]::WriteAllBytes($env:APPDATA+'\\rclone\\rclone.conf',[Convert]::FromBase64String($env:RCLONE_CONF_B64))"
-                set "RCLONE_CONF=%APPDATA%\\rclone\\rclone.conf"
+            rem === Colocar rclone.conf donde rclone lo espera en Windows (%APPDATA%) ===
+            if not exist "%APPDATA%\\rclone" mkdir "%APPDATA%\\rclone"
+            powershell -NoProfile -Command "[IO.File]::WriteAllBytes($env:APPDATA+'\\rclone\\rclone.conf',[Convert]::FromBase64String($env:RCLONE_CONF_B64))"
+            set "RCLONE_CONF=%APPDATA%\\rclone\\rclone.conf"
 
-                if not exist "app" mkdir app
-                "%RCLONE_CMD%" --config "%RCLONE_CONF%" copyto "%GDRIVE_REMOTE%:%APK_DRIVE_PATH%" "%APK_LOCAL_PATH%" --progress
+            if not exist "app" mkdir app
+            "%RCLONE_CMD%" --config "%RCLONE_CONF%" copyto "%GDRIVE_REMOTE%:%APK_DRIVE_PATH%" "%APK_LOCAL_PATH%" --progress
 
-                if not exist "%APK_LOCAL_PATH%" ( echo ERROR: No se descargo la APK && exit /b 1 )
-            '''
-            }
+            if not exist "%APK_LOCAL_PATH%" ( echo ERROR: No se descargo la APK && exit /b 1 )
+          '''
         }
-        }
+      }
+    }
 
     stage('Iniciar Emulador') {
-        options { timeout(time: 25, unit: 'MINUTES') } // subimos un poco el margen
-        steps {
-            bat '''
-            setlocal ENABLEDELAYEDEXPANSION
-            set "ADB=%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe"
-            set "EMU=%ANDROID_SDK_ROOT%\\emulator\\emulator.exe"
+      options { timeout(time: 25, unit: 'MINUTES') }
+      steps {
+        bat '''
+          setlocal ENABLEDELAYEDEXPANSION
+          set "ADB=%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe"
+          set "EMU=%ANDROID_SDK_ROOT%\\emulator\\emulator.exe"
+          set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-            rem --- PATH básico ---
-            set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
+          rem --- Lanzar emulador (background) ---
+          start /B "" "%EMU%" -avd "%AVD_NAME%" ^
+            -no-window -no-boot-anim -gpu swiftshader_indirect -timezone "%TZ%" -no-snapshot -memory 3072 -netfast ^
+            1> emulator.log 2>&1
 
-            rem --- Lanzar emulador en background y loguear ---
-            start /B "" "%EMU%" -avd "%AVD_NAME%" ^
-                -no-window -no-boot-anim -gpu swiftshader_indirect -timezone "%TZ%" -no-snapshot -memory 3072 -netfast ^
-                1> emulator.log 2>&1
+          rem --- Esperar a que ADB lo vea ---
+          "%ADB%" wait-for-device
 
-            rem --- Esperar a que ADB vea el dispositivo ---
-            "%ADB%" wait-for-device
-
-            rem --- Esperar boot completo y PackageManager listo ---
+          rem --- Esperar boot completo y PackageManager listo ---
+          set BOOT=
+          set DEV=
+          for /L %%i in (1,1,180) do (
             set BOOT=
             set DEV=
-            for /L %%i in (1,1,180) do (
-                set BOOT=
-                set DEV=
-                for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop sys.boot_completed 2^>NUL`) do set BOOT=%%b
-                for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop dev.bootcomplete 2^>NUL`) do set DEV=%%b
-
-                if "!BOOT!"=="1" if "!DEV!"=="1" (
-                "%ADB%" shell pm list packages 1>nul 2>&1
-                if !ERRORLEVEL! EQU 0 goto :pm_ready
-                )
-                timeout /t 3 >nul
+            for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop sys.boot_completed 2^>NUL`) do set BOOT=%%b
+            for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop dev.bootcomplete 2^>NUL`) do set DEV=%%b
+            if "!BOOT!"=="1" if "!DEV!"=="1" (
+              "%ADB%" shell pm list packages 1>nul 2>&1
+              if !ERRORLEVEL! EQU 0 goto :pm_ready
             )
-            :pm_ready
+            timeout /t 3 >nul
+          )
+          :pm_ready
 
-            rem --- Desactivar animaciones (acelera UI tests) ---
-            "%ADB%" shell input keyevent 82
-            "%ADB%" shell settings put global window_animation_scale 0
-            "%ADB%" shell settings put global transition_animation_scale 0
-            "%ADB%" shell settings put global animator_duration_scale 0
+          rem --- Desactivar animaciones ---
+          "%ADB%" shell input keyevent 82
+          "%ADB%" shell settings put global window_animation_scale 0
+          "%ADB%" shell settings put global transition_animation_scale 0
+          "%ADB%" shell settings put global animator_duration_scale 0
 
-            rem --- Instalar la app si existe ---
-            if exist "%APP%" "%ADB%" install -r "%APP%"
-            '''
-        }
+          rem --- Instalar APK ---
+          if exist "%APP%" "%ADB%" install -r "%APP%"
+        '''
+      }
     }
 
     stage('Appium + Dependencias Python') {
       options { timeout(time: 25, unit: 'MINUTES') }
       steps {
         bat '''
+          rem === Asegurar que el binario global de npm quede en PATH ===
+          for /f "delims=" %%P in ('npm bin -g') do set "NPM_BIN=%%P"
+          set "PATH=%NPM_BIN%;%PATH%"
+
+          rem Instalar appium y doctor si no existen
           where appium
           if %ERRORLEVEL% NEQ 0 (
             npm i -g appium appium-doctor
-            appium driver install uiautomator2
+            for /f "delims=" %%P in ('npm bin -g') do set "NPM_BIN=%%P"
+            set "PATH=%NPM_BIN%;%PATH%"
+            where appium
           )
+
+          rem Comprobaciones y driver
           appium-doctor --android
+          appium driver list 1>nul 2>&1
+          if %ERRORLEVEL% NEQ 0 appium driver install uiautomator2
 
+          rem Levantar Appium en background y esperar que esté listo
           start /B "" cmd /c "appium -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
-
           powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
 
+          rem Entorno Python
           %PYTHON% -m venv .venv
           call .venv\\Scripts\\activate.bat
           python -m pip install -U pip wheel
-          if exist requirements.txt ( pip install -r requirements.txt ) else ( pip install behave allure-behave appium-python-client selenium )
+          if exist requirements.txt (
+            pip install -r requirements.txt
+          ) else (
+            pip install behave allure-behave appium-python-client selenium
+          )
         '''
       }
     }
@@ -224,26 +241,15 @@ pipeline {
 
   post {
     always {
-      script {
-        if (env.WORKSPACE) {
-          // Limpieza que nunca rompe el build si falla
-          bat(returnStatus: true, script: '''
-            if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
-              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
-              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
-              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
-            )
-            if not exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
-              echo No hay adb (SDK fallido); omitiendo screencap y kill.
-            )
-            taskkill /F /IM node.exe /T 2>nul
-          ''')
-          archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
-
-          // Si más adelante instalas el plugin Allure, podemos publicar acá.
-          // Por ahora, eliminado para evitar el error "No such DSL method 'allure'".
-        }
-      }
+      // Limpieza que no rompe el build si falla
+      bat(returnStatus: true, script: """
+        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
+        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
+        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
+        taskkill /F /IM node.exe /T 2>nul
+      """)
+      archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
+      // Si instalas el plugin Allure, puedes publicar los resultados aquí.
     }
   }
 }
