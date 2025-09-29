@@ -12,7 +12,6 @@ pipeline {
   }
 
   environment {
-    // --- SDK/AVD en workspace (sin admin) ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
@@ -20,17 +19,14 @@ pipeline {
     SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
     DEVICE_PROFILE   = "pixel_5"
 
-    // --- Appium / Python ---
     PYTHON           = "python"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
     APP              = "app\\medicenter_app.apk"
 
-    // --- Zona horaria ---
     TZ               = "America/Argentina/Buenos_Aires"
 
-    // --- rclone / Drive ---
     GDRIVE_REMOTE    = "gdrive"
     APK_DRIVE_PATH   = "CI/medicenter_app.apk"
     APK_LOCAL_PATH   = "app\\medicenter_app.apk"
@@ -42,28 +38,24 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Android SDK & cmdline-tools (con Java 17 portable)') {
+    stage('Android SDK & cmdline-tools (usar JDK 17 instalado)') {
       options { timeout(time: 35, unit: 'MINUTES') }
       steps {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
 
-          rem === 0) JDK 17 PORTABLE para sdkmanager/avdmanager ===
-          if not exist ".tools" mkdir .tools
-          if not exist ".tools\\jdk17\\bin\\java.exe" (
-            echo Descargando JDK 17 portable...
-            curl -L -o jdk17.zip https://github.com/adoptium/temurin17-binaries/releases/latest/download/OpenJDK17U-jdk_x64_windows_hotspot.zip
-            powershell -NoProfile -Command "Expand-Archive -Force jdk17.zip .tools\\jdk17_tmp"
-            for /d %%D in (.tools\\jdk17_tmp\\*) do set JDKDIR=%%~fD
-            if not exist "!JDKDIR!" ( echo ERROR: No se pudo expandir el JDK17 & exit /b 1 )
-            move "!JDKDIR!" ".tools\\jdk17" >nul
-            rmdir /s /q ".tools\\jdk17_tmp"
-            del jdk17.zip
+          rem === Detectar JDK 17 instalado (Temurin) ===
+          set "JAVA_HOME="
+          for /d %%D in ("C:\\Program Files\\Eclipse Adoptium\\jdk-17*") do set "JAVA_HOME=%%D"
+          if not defined JAVA_HOME (
+            echo ERROR: No se encontro un JDK 17 en "C:\\Program Files\\Eclipse Adoptium".
+            echo Instala con: winget install -e --id EclipseAdoptium.Temurin.17.JDK
+            exit /b 1
           )
-          set "JAVA_HOME=%CD%\\.tools\\jdk17"
+          echo Usando JAVA_HOME=%JAVA_HOME%
           set "PATH=%JAVA_HOME%\\bin;%PATH%"
 
-          rem === 1) Cmdline-tools ===
+          rem === Cmdline-tools ===
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
 
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
@@ -76,7 +68,6 @@ pipeline {
             )
           )
 
-          rem PATH con sdk tools
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
 
           echo y | sdkmanager.bat --licenses
@@ -88,7 +79,9 @@ pipeline {
     stage('Crear AVD (si no existe)') {
       steps {
         bat '''
-          set "JAVA_HOME=%CD%\\.tools\\jdk17"
+          rem Asegurar JDK 17 en PATH otra vez
+          set "JAVA_HOME="
+          for /d %%D in ("C:\\Program Files\\Eclipse Adoptium\\jdk-17*") do set "JAVA_HOME=%%D"
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
 
           for /f "tokens=*" %%A in ('avdmanager.bat list avd ^| findstr /C:"Name: %AVD_NAME%"') do set FOUND=1
@@ -207,19 +200,18 @@ pipeline {
         if (env.WORKSPACE) {
           bat '''
             if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
-              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png || echo ok
-              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul || echo ok
-              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul || echo ok
-            ) else (
+              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
+              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
+              "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
+            )
+            if not exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" (
               echo No hay adb (SDK fallido); omitiendo screencap y kill.
             )
-            taskkill /F /IM node.exe /T 2>nul || echo ok
+            taskkill /F /IM node.exe /T 2>nul
           '''
           archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
           script {
-            try {
-              allure includeProperties: false, jdk: '', results: [[path: 'reports/allure-results']]
-            } catch (ignored) { }
+            try { allure includeProperties: false, jdk: '', results: [[path: 'reports/allure-results']] } catch (ignored) { }
           }
         } else {
           echo 'Sin WORKSPACE (no se asignó nodo). Omitiendo cleanup/artefactos.'
