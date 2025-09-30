@@ -174,32 +174,33 @@ pipeline {
           set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-          rem --- Asegurar binarios globales de npm en PATH (cuenta del servicio Jenkins) ---
+          rem --- Binarios globales de npm en PATH (cuenta del servicio Jenkins) ---
           set "NPM_PREFIX=%APPDATA%\\npm"
           if exist "%NPM_PREFIX%" set "PATH=%NPM_PREFIX%;%PATH%"
 
           where node || (echo ERROR: Node.js/NPM no estan en PATH & exit /b 1)
 
-          rem --- Instalar Appium + Doctor si no existen ---
+          rem --- Appium + doctor (si falta, instalar) ---
           where appium >nul 2>&1
           if %ERRORLEVEL% NEQ 0 (
             npm i -g appium @appium/doctor
             if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
           )
 
-          rem --- Doctor (no fallar por warnings; 'android' ya no existe en SDK nuevos) ---
+          rem --- Doctor (no fallar por warnings; 'android' tool ya no existe) ---
           cmd /c appium-doctor --android  || echo (appium-doctor devolvio warnings; continuo)
 
-          rem --- Levantar Appium en background y esperar /status ---
+          rem --- Levantar Appium y esperar /status ---
           start /B "" cmd /c "appium -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
           powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
 
-          rem ====== PYTHON LOCAL AL WORKSPACE (sin tocar el sistema) ======
+          rem ================= PYTHON LOCAL (portable) =================
           set "PY_EXE=%SystemRoot%\\py.exe"
-          set "PY_LOCAL=%WORKSPACE%\\.tools\\Python311\\python.exe"
+          set "PY_DIR=%WORKSPACE%\\.tools\\Python311"
+          set "PY_LOCAL=%PY_DIR%\\python.exe"
           set "PY_DL=%WORKSPACE%\\.tools\\py311.exe"
 
-          rem Si py.exe no tiene un 3.x registrado, usamos Python local del job
+          rem Si py.exe no tiene un 3.x visible para el usuario del servicio, usamos portable
           if exist "%PY_EXE%" (
             "%PY_EXE%" -3 -c "import sys" 1>nul 2>nul || set "USE_LOCAL=1"
           ) else (
@@ -209,28 +210,79 @@ pipeline {
           if "%USE_LOCAL%"=="1" (
             if not exist "%WORKSPACE%\\.tools" mkdir "%WORKSPACE%\\.tools"
             if not exist "%PY_LOCAL%" (
-              echo Descargando Python 3.11 en "%PY_DL%"...
+              echo Descargando Python 3.11 portable en "%PY_DL%"...
               curl -L -o "%PY_DL%" https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe
               if not exist "%PY_DL%" (echo ERROR: No se pudo descargar Python & exit /b 1)
-              start /wait "" "%PY_DL%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 TargetDir="%WORKSPACE%\\.tools\\Python311"
+
+              echo Instalando Python 3.11 portable en "%PY_DIR%"...
+              start /wait "" "%PY_DL%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_pip=1 TargetDir="%PY_DIR%"
+
+              rem Espera hasta 180s a que aparezca python.exe (algunos instaladores spawnean msiexec)
+              set /a __T=0
+              :__WAIT_PY
+              if exist "%PY_LOCAL%" goto __PY_OK
+              set /a __T+=1
+              if !__T! GEQ 180 goto __PY_FALLBACK_EMBED
+              timeout /t 1 >nul
+              goto __WAIT_PY
+
+              :__PY_OK
+              echo Python instalado: %PY_LOCAL%
+              set "PYTHON_BOOT=%PY_LOCAL%"
+              goto __HAVE_PY
+
+              :__PY_FALLBACK_EMBED
+              echo WARNING: python.exe no aparecio tras instalar; usando fallback embebido...
+              set "EMB_DIR=%WORKSPACE%\\.tools\\Python311-embed"
+              set "EMB_ZIP=%WORKSPACE%\\.tools\\py311-embed.zip"
+              curl -L -o "%EMB_ZIP%" https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip
+              if not exist "%EMB_ZIP%" (echo ERROR: No se pudo descargar Python embebido & exit /b 1)
+              powershell -NoProfile -Command "Expand-Archive -Force '%EMB_ZIP%' '%EMB_DIR%'"
+              del "%EMB_ZIP%"
+
+              rem Habilitar 'import site' en el embebido
+              powershell -NoProfile -Command "(Get-Content '%EMB_DIR%\\python311._pth') -replace '^(#\\s*)?import site','import site' | Set-Content '%EMB_DIR%\\python311._pth'"
+
+              set "PYTHON_BOOT=%EMB_DIR%\\python.exe"
+
+              rem Bootstrap pip en el embebido
+              curl -L -o "%WORKSPACE%\\.tools\\get-pip.py" https://bootstrap.pypa.io/get-pip.py
+              "%PYTHON_BOOT%" "%WORKSPACE%\\.tools\\get-pip.py"
+              del "%WORKSPACE%\\.tools\\get-pip.py"
+
+              rem Marcador para etapa de pruebas (sin venv)
+              > py_mode.env echo PY_NO_VENV=1
+            ) else (
+              set "PYTHON_BOOT=%PY_LOCAL%"
             )
-            if not exist "%PY_LOCAL%" (echo ERROR: Python local no se instalo & exit /b 1)
-            set "PYTHON_BOOT=%PY_LOCAL%"
           ) else (
             set "PYTHON_BOOT=%PY_EXE% -3"
           )
 
-          rem --- Crear venv y dependencias ---
-          %PYTHON_BOOT% -m venv .venv
-          if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
+          :__HAVE_PY
+          echo Usando interprete: %PYTHON_BOOT%
 
-          call .venv\\Scripts\\activate.bat
-          set "VENV_PY=.venv\\Scripts\\python.exe"
-          "%VENV_PY%" -m pip install -U pip wheel
-          if exist requirements.txt (
-            "%VENV_PY%" -m pip install -r requirements.txt
+          rem --- Intentar venv; si falla (embebido), seguimos sin venv ---
+          %PYTHON_BOOT% -m venv .venv 1>nul 2>nul
+
+          if exist ".venv\\Scripts\\python.exe" (
+            call .venv\\Scripts\\activate.bat
+            set "VENV_PY=.venv\\Scripts\\python.exe"
+            "%VENV_PY%" -m pip install -U pip wheel
+            if exist requirements.txt (
+              "%VENV_PY%" -m pip install -r requirements.txt
+            ) else (
+              "%VENV_PY%" -m pip install behave allure-behave appium-python-client selenium
+            )
           ) else (
-            "%VENV_PY%" -m pip install behave allure-behave appium-python-client selenium
+            echo WARNING: venv no disponible; instalando deps en el Python portable...
+            %PYTHON_BOOT% -m pip install -U pip wheel
+            if exist requirements.txt (
+              %PYTHON_BOOT% -m pip install -r requirements.txt
+            ) else (
+              %PYTHON_BOOT% -m pip install behave allure-behave appium-python-client selenium
+            )
+            > py_mode.env echo PY_NO_VENV=1
           )
         '''
       }
@@ -239,29 +291,40 @@ pipeline {
     stage('Ejecutar pruebas (Behave)') {
       steps {
         bat '''
-          if not exist ".venv\\Scripts\\activate.bat" (
-            echo ERROR: no hay venv; revisa el stage anterior & exit /b 1
+          setlocal
+          set "APPIUM_SERVER_URL=http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%"
+          set "ANDROID_AVD=%AVD_NAME%"
+          set "ANDROID_API=%API_LEVEL%"
+          set "APK_PATH=%APP%"
+          set "TZ=%TZ%"
+
+          if exist py_mode.env (
+            for /f "usebackq delims=" %%L in (`type py_mode.env`) do set %%L
           )
-          call .venv\\Scripts\\activate.bat
-          set "VENV_PY=.venv\\Scripts\\python.exe"
+
+          if exist ".venv\\Scripts\\activate.bat" (
+            call .venv\\Scripts\\activate.bat
+            set "RUNPY=python"
+          ) else (
+            rem usar Python portable directo
+            if exist "%WORKSPACE%\\.tools\\Python311\\python.exe" (
+              set "RUNPY=%WORKSPACE%\\.tools\\Python311\\python.exe"
+            ) else (
+              set "RUNPY=%WORKSPACE%\\.tools\\Python311-embed\\python.exe"
+            )
+          )
 
           if not exist "reports\\allure-results" mkdir "reports\\allure-results"
 
-          set APPIUM_SERVER_URL=http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%
-          set ANDROID_AVD=%AVD_NAME%
-          set ANDROID_API=%API_LEVEL%
-          set APK_PATH=%APP%
-          set TZ=%TZ%
-
           if not "%BEHAVE_TAGS%"=="" (
-            "%VENV_PY%" -m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results --tags "%BEHAVE_TAGS%"
+            %RUNPY% -m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results --tags "%BEHAVE_TAGS%"
           ) else (
-            "%VENV_PY%" -m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+            %RUNPY% -m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           )
         '''
       }
     }
-  }
+
 
   post {
     always {
