@@ -22,7 +22,7 @@ pipeline {
     DEVICE_PROFILE   = "pixel_5"
 
     // --- Appium / Python ---
-    PYTHON           = "python"
+    PYTHON           = "py -3"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
