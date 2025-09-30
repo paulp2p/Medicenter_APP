@@ -337,4 +337,4 @@ pipeline {
       archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
     }
   }
-}
+
