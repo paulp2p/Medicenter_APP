@@ -326,15 +326,15 @@ pipeline {
     }
 
 
-  post {
-    always {
-      bat(returnStatus: true, script: """
-        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
-        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
-        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
-        taskkill /F /IM node.exe /T 2>nul
-      """)
-      archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
+    post {
+      always {
+        bat(returnStatus: true, script: """
+          if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
+          if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
+          if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
+          taskkill /F /IM node.exe /T 2>nul
+        """)
+        archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
+      }
     }
-  }
 
