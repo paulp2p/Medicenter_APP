@@ -14,7 +14,7 @@ pipeline {
   environment {
     // --- Android SDK / AVD ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
-    ANDROID_HOME     = "${WORKSPACE}\\android-sdk"          // <- agregado
+    ANDROID_HOME     = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
     API_LEVEL        = "30"
@@ -22,8 +22,10 @@ pipeline {
     DEVICE_PROFILE   = "pixel_5"
 
     // --- Appium / Python ---
-    PYTHON           = "py -3 -m venv"
-    PYTHON_FALLBACK = "C:\\Program Files\\Python312\\python.exe"
+    PYTHON           = "py -3" // <-- ahora es SOLO el intérprete
+    // Fallbacks (no se usan aquí directo; se resuelven en cada stage)
+    PY_SYS_PY312     = "C:\\Program Files\\Python312\\python.exe"
+    PY_USER_PY312    = "C:\\Users\\paulr\\AppData\\Local\\Programs\\Python\\Python312\\python.exe" // <-- ajusta si tu usuario es otro
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
@@ -121,145 +123,4 @@ pipeline {
             if not exist "app" mkdir app
             "%RCLONE_CMD%" --config "%RCLONE_CONF%" copyto "%GDRIVE_REMOTE%:%APK_DRIVE_PATH%" "%APK_LOCAL_PATH%" --progress
 
-            if not exist "%APK_LOCAL_PATH%" ( echo ERROR: No se descargo la APK && exit /b 1 )
-          '''
-        }
-      }
-    }
-
-    stage('Iniciar Emulador') {
-      options { timeout(time: 25, unit: 'MINUTES') }
-      steps {
-        bat '''
-          setlocal ENABLEDELAYEDEXPANSION
-          set "ADB=%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe"
-          set "EMU=%ANDROID_SDK_ROOT%\\emulator\\emulator.exe"
-          set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
-
-          start /B "" "%EMU%" -avd "%AVD_NAME%" ^
-            -no-window -no-boot-anim -gpu swiftshader_indirect -timezone "%TZ%" -no-snapshot -memory 3072 -netfast ^
-            1> emulator.log 2>&1
-
-          "%ADB%" wait-for-device
-
-          set BOOT=
-          set DEV=
-          for /L %%i in (1,1,180) do (
-            set BOOT=
-            set DEV=
-            for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop sys.boot_completed 2^>NUL`) do set BOOT=%%b
-            for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop dev.bootcomplete 2^>NUL`) do set DEV=%%b
-            if "!BOOT!"=="1" if "!DEV!"=="1" (
-              "%ADB%" shell pm list packages 1>nul 2>&1
-              if !ERRORLEVEL! EQU 0 goto :pm_ready
-            )
-            timeout /t 3 >nul
-          )
-          :pm_ready
-
-          "%ADB%" shell input keyevent 82
-          "%ADB%" shell settings put global window_animation_scale 0
-          "%ADB%" shell settings put global transition_animation_scale 0
-          "%ADB%" shell settings put global animator_duration_scale 0
-
-          if exist "%APP%" "%ADB%" install -r "%APP%"
-        '''
-      }
-    }
-
-    stage('Appium + Dependencias Python') {
-      options { timeout(time: 25, unit: 'MINUTES') }
-      steps {
-        bat '''
-          rem --- Entorno para Appium ---
-          set "JAVA_HOME=%JAVA17_HOME%"
-          set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
-          set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
-
-          rem Binarios globales de npm para cuenta del servicio Jenkins
-          set "NPM_BIN=%APPDATA%\\npm"
-          if exist "%NPM_BIN%" set "PATH=%NPM_BIN%;%PATH%"
-
-          where node || (echo ERROR: Node.js/NPM no estan en PATH & exit /b 1)
-
-          rem Instalar appium y doctor (nuevo paquete) si no existen
-          where appium >nul 2>&1
-          if %ERRORLEVEL% NEQ 0 (
-            npm i -g appium @appium/doctor
-            if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
-          )
-
-          rem Elegir comando: global o npx fallback
-          where appium >nul 2>&1
-          if %ERRORLEVEL% EQU 0 (
-            set "APPIUM_CMD=appium"
-            set "APPIUM_DOCTOR=appium-doctor"
-          ) else (
-            echo Usando npx para appium...
-            set "APPIUM_CMD=npx -y appium@latest"
-            set "APPIUM_DOCTOR=npx -y @appium/doctor"
-          )
-
-          rem Doctor (no romper si devuelve error)
-          cmd /c %APPIUM_DOCTOR% --android || echo (appium-doctor devolvio warnings; continuo)
-
-          rem Levantar Appium
-          start /B "" cmd /c "%APPIUM_CMD% -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
-          powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
-
-          rem VENV + deps siempre
-          %PYTHON% -m venv .venv
-          if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
-          call .venv\\Scripts\\activate.bat
-          python -m pip install -U pip wheel
-          if exist requirements.txt (
-            pip install -r requirements.txt
-          ) else (
-            pip install behave allure-behave appium-python-client selenium
-          )
-        '''
-      }
-    }
-
-    stage('Ejecutar pruebas (Behave)') {
-      steps {
-        bat '''
-          if not exist ".venv\\Scripts\\activate.bat" (
-            %PYTHON% -m venv .venv
-            call .venv\\Scripts\\activate.bat
-            python -m pip install -U pip wheel
-            pip install behave allure-behave appium-python-client selenium
-          ) else (
-            call .venv\\Scripts\\activate.bat
-          )
-
-          if not exist "reports\\allure-results" mkdir "reports\\allure-results"
-
-          set APPIUM_SERVER_URL=http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%
-          set ANDROID_AVD=%AVD_NAME%
-          set ANDROID_API=%API_LEVEL%
-          set APK_PATH=%APP%
-          set TZ=%TZ%
-
-          if not "%BEHAVE_TAGS%"=="" (
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results --tags "%BEHAVE_TAGS%"
-          ) else (
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
-          )
-        '''
-      }
-    }
-  }
-
-  post {
-    always {
-      bat(returnStatus: true, script: """
-        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
-        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
-        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
-        taskkill /F /IM node.exe /T 2>nul
-      """)
-      archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
-    }
-  }
-}
+            if not exist "%APK_LOCAL_PATH%" ( echo ERROR:
