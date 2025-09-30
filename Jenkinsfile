@@ -167,35 +167,39 @@ pipeline {
       options { timeout(time: 25, unit: 'MINUTES') }
       steps {
         bat '''
+          setlocal ENABLEDELAYEDEXPANSION
+
           rem --- PATH base para Appium / SDK ---
           set "JAVA_HOME=%JAVA17_HOME%"
           set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-          rem Asegurar binarios globales de npm en PATH
+          rem --- Asegurar binarios globales de npm en PATH (cuenta del servicio Jenkins) ---
           set "NPM_PREFIX=%APPDATA%\\npm"
           if exist "%NPM_PREFIX%" set "PATH=%NPM_PREFIX%;%PATH%"
 
           where node || (echo ERROR: Node.js/NPM no estan en PATH & exit /b 1)
 
-          rem Instalar Appium + doctor si no existen
+          rem --- Instalar Appium + Doctor si no existen ---
           where appium >nul 2>&1
           if %ERRORLEVEL% NEQ 0 (
             npm i -g appium @appium/doctor
             if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
           )
 
-          rem Doctor (no fallar si hay warnings)
+          rem --- Doctor (no fallar por warnings; 'android' ya no existe en SDK nuevos) ---
           cmd /c appium-doctor --android  || echo (appium-doctor devolvio warnings; continuo)
 
-          rem Levantar Appium y esperar /status
+          rem --- Levantar Appium en background y esperar /status ---
           start /B "" cmd /c "appium -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
           powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
 
-          rem ---- Python local al workspace (instalar si no hay) ----
+          rem ====== PYTHON LOCAL AL WORKSPACE (sin tocar el sistema) ======
           set "PY_EXE=%SystemRoot%\\py.exe"
           set "PY_LOCAL=%WORKSPACE%\\.tools\\Python311\\python.exe"
+          set "PY_DL=%WORKSPACE%\\.tools\\py311.exe"
 
+          rem Si py.exe no tiene un 3.x registrado, usamos Python local del job
           if exist "%PY_EXE%" (
             "%PY_EXE%" -3 -c "import sys" 1>nul 2>nul || set "USE_LOCAL=1"
           ) else (
@@ -205,21 +209,23 @@ pipeline {
           if "%USE_LOCAL%"=="1" (
             if not exist "%WORKSPACE%\\.tools" mkdir "%WORKSPACE%\\.tools"
             if not exist "%PY_LOCAL%" (
-              powershell -NoProfile -Command "$u='https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe'; $d='$env:WORKSPACE\\.tools\\py311.exe'; iwr $u -OutFile $d"
-              start /wait "" "%WORKSPACE%\\.tools\\py311.exe" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 TargetDir="%WORKSPACE%\\.tools\\Python311"
+              echo Descargando Python 3.11 en "%PY_DL%"...
+              curl -L -o "%PY_DL%" https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe
+              if not exist "%PY_DL%" (echo ERROR: No se pudo descargar Python & exit /b 1)
+              start /wait "" "%PY_DL%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 TargetDir="%WORKSPACE%\\.tools\\Python311"
             )
+            if not exist "%PY_LOCAL%" (echo ERROR: Python local no se instalo & exit /b 1)
             set "PYTHON_BOOT=%PY_LOCAL%"
           ) else (
             set "PYTHON_BOOT=%PY_EXE% -3"
           )
 
-          rem Crear venv y deps con el Python elegido
-          if exist ".venv\\Scripts\\python.exe" del /q ".venv\\Scripts\\python.exe" >nul 2>&1
+          rem --- Crear venv y dependencias ---
           %PYTHON_BOOT% -m venv .venv
           if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
 
-          set "VENV_PY=.venv\\Scripts\\python.exe"
           call .venv\\Scripts\\activate.bat
+          set "VENV_PY=.venv\\Scripts\\python.exe"
           "%VENV_PY%" -m pip install -U pip wheel
           if exist requirements.txt (
             "%VENV_PY%" -m pip install -r requirements.txt
