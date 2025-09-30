@@ -12,7 +12,7 @@ pipeline {
   }
 
   environment {
-    // --- ANDROID SDK / AVD ---
+    // --- Android SDK / AVD ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
     ANDROID_HOME     = "${WORKSPACE}\\android-sdk"
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
@@ -192,13 +192,30 @@ pipeline {
           start /B "" cmd /c "appium -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
           powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
 
-          rem ---- Python virtualenv (usar py.exe si existe) ----
+          rem ---- Python local al workspace (instalar si no hay) ----
           set "PY_EXE=%SystemRoot%\\py.exe"
+          set "PY_LOCAL=%WORKSPACE%\\.tools\\Python311\\python.exe"
+
           if exist "%PY_EXE%" (
-            "%PY_EXE%" -3 -m venv .venv
+            "%PY_EXE%" -3 -c "import sys" 1>nul 2>nul || set "USE_LOCAL=1"
           ) else (
-            python -m venv .venv
+            set "USE_LOCAL=1"
           )
+
+          if "%USE_LOCAL%"=="1" (
+            if not exist "%WORKSPACE%\\.tools" mkdir "%WORKSPACE%\\.tools"
+            if not exist "%PY_LOCAL%" (
+              powershell -NoProfile -Command "$u='https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe'; $d='$env:WORKSPACE\\.tools\\py311.exe'; iwr $u -OutFile $d"
+              start /wait "" "%WORKSPACE%\\.tools\\py311.exe" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 TargetDir="%WORKSPACE%\\.tools\\Python311"
+            )
+            set "PYTHON_BOOT=%PY_LOCAL%"
+          ) else (
+            set "PYTHON_BOOT=%PY_EXE% -3"
+          )
+
+          rem Crear venv y deps con el Python elegido
+          if exist ".venv\\Scripts\\python.exe" del /q ".venv\\Scripts\\python.exe" >nul 2>&1
+          %PYTHON_BOOT% -m venv .venv
           if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
 
           set "VENV_PY=.venv\\Scripts\\python.exe"
@@ -217,12 +234,11 @@ pipeline {
       steps {
         bat '''
           if not exist ".venv\\Scripts\\activate.bat" (
-            set "PY_EXE=%SystemRoot%\\py.exe"
-            if exist "%PY_EXE%" ("%PY_EXE%" -3 -m venv .venv) else (python -m venv .venv)
+            echo ERROR: no hay venv; revisa el stage anterior & exit /b 1
           )
           call .venv\\Scripts\\activate.bat
-
           set "VENV_PY=.venv\\Scripts\\python.exe"
+
           if not exist "reports\\allure-results" mkdir "reports\\allure-results"
 
           set APPIUM_SERVER_URL=http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%
