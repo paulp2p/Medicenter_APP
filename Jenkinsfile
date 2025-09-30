@@ -179,42 +179,51 @@ pipeline {
     }
 
     stage('Appium + Dependencias Python') {
-      options { timeout(time: 25, unit: 'MINUTES') }
-      steps {
-        bat '''
-          rem === Asegurar que el binario global de npm quede en PATH ===
-          for /f "delims=" %%P in ('npm bin -g') do set "NPM_BIN=%%P"
-          set "PATH=%NPM_BIN%;%PATH%"
+        options { timeout(time: 25, unit: 'MINUTES') }
+        steps {
+            bat '''
+            rem === Donde npm pone los ejecutables globales en Windows (cuenta del servicio) ===
+            set "NPM_BIN=%APPDATA%\\npm"
+            if exist "%NPM_BIN%" set "PATH=%NPM_BIN%;%PATH%"
 
-          rem Instalar appium y doctor si no existen
-          where appium
-          if %ERRORLEVEL% NEQ 0 (
-            npm i -g appium appium-doctor
-            for /f "delims=" %%P in ('npm bin -g') do set "NPM_BIN=%%P"
-            set "PATH=%NPM_BIN%;%PATH%"
-            where appium
-          )
+            rem Verificar Node/npm visibles
+            where node || (echo ERROR: Node.js/NPM no estan en PATH para el servicio de Jenkins & exit /b 1)
 
-          rem Comprobaciones y driver
-          appium-doctor --android
-          appium driver list 1>nul 2>&1
-          if %ERRORLEVEL% NEQ 0 appium driver install uiautomator2
+            rem Instalar appium y doctor si no existen
+            where appium >nul 2>&1
+            if %ERRORLEVEL% NEQ 0 (
+                npm i -g appium appium-doctor
+                rem volver a inyectar el bin global por si recien se creo
+                if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
+            )
 
-          rem Levantar Appium en background y esperar que esté listo
-          start /B "" cmd /c "appium -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
-          powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
+            rem Elegir comando (appium global o via npx fallback)
+            where appium >nul 2>&1
+            if %ERRORLEVEL% EQU 0 (
+                set "APPIUM_CMD=appium"
+                set "APPIUM_DOCTOR=appium-doctor"
+            ) else (
+                echo Usando npx para appium...
+                set "APPIUM_CMD=npx -y appium@latest"
+                set "APPIUM_DOCTOR=npx -y appium-doctor@latest"
+            )
 
-          rem Entorno Python
-          %PYTHON% -m venv .venv
-          call .venv\\Scripts\\activate.bat
-          python -m pip install -U pip wheel
-          if exist requirements.txt (
-            pip install -r requirements.txt
-          ) else (
-            pip install behave allure-behave appium-python-client selenium
-          )
-        '''
-      }
+            rem Comprobaciones y driver
+            %APPIUM_DOCTOR% --android
+            %APPIUM_CMD% driver list 1>nul 2>&1
+            if %ERRORLEVEL% NEQ 0 %APPIUM_CMD% driver install uiautomator2
+
+            rem Levantar Appium y esperar que este listo
+            start /B "" cmd /c "%APPIUM_CMD% -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
+            powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
+
+            rem Entorno Python
+            %PYTHON% -m venv .venv
+            call .venv\\Scripts\\activate.bat
+            python -m pip install -U pip wheel
+            if exist requirements.txt ( pip install -r requirements.txt ) else ( pip install behave allure-behave appium-python-client selenium )
+            '''
+        }
     }
 
     stage('Ejecutar pruebas (Behave)') {
