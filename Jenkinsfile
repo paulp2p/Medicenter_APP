@@ -4,16 +4,17 @@ pipeline {
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '15'))
-    timeout(time: 120, unit: 'MINUTES') // primera vez puede tardar
+    timeout(time: 120, unit: 'MINUTES')
   }
 
   parameters {
-    string(name: 'BEHAVE_TAGS', defaultValue: '', description: 'Etiquetas Behave, ej.: @smoke o @regression')
+    string(name: 'BEHAVE_TAGS', defaultValue: '', description: 'Etiquetas Behave, ej.: @smoke')
   }
 
   environment {
     // --- Android SDK / AVD ---
     ANDROID_SDK_ROOT = "${WORKSPACE}\\android-sdk"
+    ANDROID_HOME     = "${WORKSPACE}\\android-sdk"          // <- agregado
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
     API_LEVEL        = "30"
@@ -38,9 +39,7 @@ pipeline {
 
   stages {
 
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Verificar Java 17') {
       steps {
@@ -64,12 +63,9 @@ pipeline {
       steps {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
-
-          rem === Usar Java 17 para sdkmanager/avdmanager ===
           set "JAVA_HOME=%JAVA17_HOME%"
           set "PATH=%JAVA_HOME%\\bin;%PATH%"
 
-          rem === Instalar commandline-tools si falta ===
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
             cd /d "%ANDROID_SDK_ROOT%\\cmdline-tools"
@@ -81,10 +77,8 @@ pipeline {
             )
           )
 
-          rem === PATH del SDK + JDK 17 ===
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
 
-          rem === Aceptar licencias e instalar paquetes (robusto en Windows) ===
           ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat --licenses
           ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
         '''
@@ -119,7 +113,6 @@ pipeline {
             )
             set "RCLONE_CMD=%CD%\\.tools\\rclone.exe"
 
-            rem === Colocar rclone.conf donde rclone lo espera en Windows (%APPDATA%) ===
             if not exist "%APPDATA%\\rclone" mkdir "%APPDATA%\\rclone"
             powershell -NoProfile -Command "[IO.File]::WriteAllBytes($env:APPDATA+'\\rclone\\rclone.conf',[Convert]::FromBase64String($env:RCLONE_CONF_B64))"
             set "RCLONE_CONF=%APPDATA%\\rclone\\rclone.conf"
@@ -142,15 +135,12 @@ pipeline {
           set "EMU=%ANDROID_SDK_ROOT%\\emulator\\emulator.exe"
           set "PATH=%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-          rem --- Lanzar emulador (background) ---
           start /B "" "%EMU%" -avd "%AVD_NAME%" ^
             -no-window -no-boot-anim -gpu swiftshader_indirect -timezone "%TZ%" -no-snapshot -memory 3072 -netfast ^
             1> emulator.log 2>&1
 
-          rem --- Esperar a que ADB lo vea ---
           "%ADB%" wait-for-device
 
-          rem --- Esperar boot completo y PackageManager listo ---
           set BOOT=
           set DEV=
           for /L %%i in (1,1,180) do (
@@ -166,70 +156,82 @@ pipeline {
           )
           :pm_ready
 
-          rem --- Desactivar animaciones ---
           "%ADB%" shell input keyevent 82
           "%ADB%" shell settings put global window_animation_scale 0
           "%ADB%" shell settings put global transition_animation_scale 0
           "%ADB%" shell settings put global animator_duration_scale 0
 
-          rem --- Instalar APK ---
           if exist "%APP%" "%ADB%" install -r "%APP%"
         '''
       }
     }
 
     stage('Appium + Dependencias Python') {
-        options { timeout(time: 25, unit: 'MINUTES') }
-        steps {
-            bat '''
-            rem === Donde npm pone los ejecutables globales en Windows (cuenta del servicio) ===
-            set "NPM_BIN=%APPDATA%\\npm"
-            if exist "%NPM_BIN%" set "PATH=%NPM_BIN%;%PATH%"
+      options { timeout(time: 25, unit: 'MINUTES') }
+      steps {
+        bat '''
+          rem --- Entorno para Appium ---
+          set "JAVA_HOME=%JAVA17_HOME%"
+          set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
+          set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-            rem Verificar Node/npm visibles
-            where node || (echo ERROR: Node.js/NPM no estan en PATH para el servicio de Jenkins & exit /b 1)
+          rem Binarios globales de npm para cuenta del servicio Jenkins
+          set "NPM_BIN=%APPDATA%\\npm"
+          if exist "%NPM_BIN%" set "PATH=%NPM_BIN%;%PATH%"
 
-            rem Instalar appium y doctor si no existen
-            where appium >nul 2>&1
-            if %ERRORLEVEL% NEQ 0 (
-                npm i -g appium appium-doctor
-                rem volver a inyectar el bin global por si recien se creo
-                if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
-            )
+          where node || (echo ERROR: Node.js/NPM no estan en PATH & exit /b 1)
 
-            rem Elegir comando (appium global o via npx fallback)
-            where appium >nul 2>&1
-            if %ERRORLEVEL% EQU 0 (
-                set "APPIUM_CMD=appium"
-                set "APPIUM_DOCTOR=appium-doctor"
-            ) else (
-                echo Usando npx para appium...
-                set "APPIUM_CMD=npx -y appium@latest"
-                set "APPIUM_DOCTOR=npx -y appium-doctor@latest"
-            )
+          rem Instalar appium y doctor (nuevo paquete) si no existen
+          where appium >nul 2>&1
+          if %ERRORLEVEL% NEQ 0 (
+            npm i -g appium @appium/doctor
+            if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
+          )
 
-            rem Comprobaciones y driver
-            %APPIUM_DOCTOR% --android
-            %APPIUM_CMD% driver list 1>nul 2>&1
-            if %ERRORLEVEL% NEQ 0 %APPIUM_CMD% driver install uiautomator2
+          rem Elegir comando: global o npx fallback
+          where appium >nul 2>&1
+          if %ERRORLEVEL% EQU 0 (
+            set "APPIUM_CMD=appium"
+            set "APPIUM_DOCTOR=appium-doctor"
+          ) else (
+            echo Usando npx para appium...
+            set "APPIUM_CMD=npx -y appium@latest"
+            set "APPIUM_DOCTOR=npx -y @appium/doctor"
+          )
 
-            rem Levantar Appium y esperar que este listo
-            start /B "" cmd /c "%APPIUM_CMD% -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
-            powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
+          rem Doctor (no romper si devuelve error)
+          cmd /c %APPIUM_DOCTOR% --android || echo (appium-doctor devolvio warnings; continuo)
 
-            rem Entorno Python
-            %PYTHON% -m venv .venv
-            call .venv\\Scripts\\activate.bat
-            python -m pip install -U pip wheel
-            if exist requirements.txt ( pip install -r requirements.txt ) else ( pip install behave allure-behave appium-python-client selenium )
-            '''
-        }
+          rem Levantar Appium
+          start /B "" cmd /c "%APPIUM_CMD% -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
+          powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
+
+          rem VENV + deps siempre
+          %PYTHON% -m venv .venv
+          if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
+          call .venv\\Scripts\\activate.bat
+          python -m pip install -U pip wheel
+          if exist requirements.txt (
+            pip install -r requirements.txt
+          ) else (
+            pip install behave allure-behave appium-python-client selenium
+          )
+        '''
+      }
     }
 
     stage('Ejecutar pruebas (Behave)') {
       steps {
         bat '''
-          call .venv\\Scripts\\activate.bat
+          if not exist ".venv\\Scripts\\activate.bat" (
+            %PYTHON% -m venv .venv
+            call .venv\\Scripts\\activate.bat
+            python -m pip install -U pip wheel
+            pip install behave allure-behave appium-python-client selenium
+          ) else (
+            call .venv\\Scripts\\activate.bat
+          )
+
           if not exist "reports\\allure-results" mkdir "reports\\allure-results"
 
           set APPIUM_SERVER_URL=http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%
@@ -250,7 +252,6 @@ pipeline {
 
   post {
     always {
-      // Limpieza que no rompe el build si falla
       bat(returnStatus: true, script: """
         if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
         if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
@@ -258,7 +259,6 @@ pipeline {
         taskkill /F /IM node.exe /T 2>nul
       """)
       archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
-      // Si instalas el plugin Allure, puedes publicar los resultados aquí.
     }
   }
 }
