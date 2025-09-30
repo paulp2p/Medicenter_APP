@@ -22,7 +22,8 @@ pipeline {
     DEVICE_PROFILE   = "pixel_5"
 
     // --- Appium / Python ---
-    PYTHON           = "py -3"
+    PYTHON           = "py -3 -m venv"
+    PYTHON_FALLBACK = "C:\\Program Files\\Python312\\python.exe"
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
