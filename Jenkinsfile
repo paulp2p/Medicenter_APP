@@ -21,7 +21,7 @@ pipeline {
     SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
     DEVICE_PROFILE   = "pixel_5"
 
-    // --- Appium / Python / Node ---
+    // --- Appium / Node ---
     APPIUM_HOST      = "127.0.0.1"
     APPIUM_PORT      = "4723"
     APPIUM_BASE_PATH = "/wd/hub"
@@ -37,9 +37,7 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Verificar Java 17') {
       steps {
@@ -63,11 +61,9 @@ pipeline {
       steps {
         bat '''
           setlocal ENABLEDELAYEDEXPANSION
-          rem Usar JDK17 para sdkmanager/avdmanager
           set "JAVA_HOME=%JAVA17_HOME%"
           set "PATH=%JAVA_HOME%\\bin;%PATH%"
 
-          rem cmdline-tools
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools" mkdir "%ANDROID_SDK_ROOT%\\cmdline-tools"
           if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin\\sdkmanager.bat" (
             cd /d "%ANDROID_SDK_ROOT%\\cmdline-tools"
@@ -75,17 +71,12 @@ pipeline {
             powershell -NoProfile -Command "Expand-Archive -Force cmdtools.zip ."
             del cmdtools.zip
             if exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\cmdline-tools" (
-              move "%ANDROID_SDK_ROOT%\\cmdline-tools\\cmdline-tools" "%ANDROID_SDK_RO0T%\\cmdline-tools\\latest" >nul
-            )
-            if not exist "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest" (
               move "%ANDROID_SDK_ROOT%\\cmdline-tools\\cmdline-tools" "%ANDROID_SDK_ROOT%\\cmdline-tools\\latest" >nul
             )
           )
 
-          rem PATH del SDK + JDK17
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
 
-          rem Licencias + paquetes
           ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat --licenses
           ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
         '''
@@ -147,7 +138,6 @@ pipeline {
 
           "%ADB%" wait-for-device
 
-          rem Esperar boot completo y disponibilidad del PACKAGE MANAGER
           set BOOT=
           set DEV=
           for /L %%i in (1,1,180) do (
@@ -156,20 +146,18 @@ pipeline {
             for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop sys.boot_completed 2^>NUL`) do set BOOT=%%b
             for /f "usebackq delims=" %%b in (`"%ADB%" shell getprop dev.bootcomplete 2^>NUL`) do set DEV=%%b
             if "!BOOT!"=="1" if "!DEV!"=="1" (
-              "%ADB%" shell pm list packages  1>nul 2>&1
+              "%ADB%" shell pm list packages 1>nul 2>&1
               if !ERRORLEVEL! EQU 0 goto :pm_ready
             )
             timeout /t 3 >nul
           )
           :pm_ready
 
-          rem Desactivar animaciones y desbloquear pantalla
           "%ADB%" shell input keyevent 82
           "%ADB%" shell settings put global window_animation_scale 0
           "%ADB%" shell settings put global transition_animation_scale 0
           "%ADB%" shell settings put global animator_duration_scale 0
 
-          rem Instalar la APK si existe
           if exist "%APP%" "%ADB%" install -r "%APP%"
         '''
       }
@@ -184,7 +172,7 @@ pipeline {
           set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-          rem Asegurar binarios globales de npm en PATH (npm v10 en Windows)
+          rem Asegurar binarios globales de npm en PATH
           set "NPM_PREFIX=%APPDATA%\\npm"
           if exist "%NPM_PREFIX%" set "PATH=%NPM_PREFIX%;%PATH%"
 
@@ -197,37 +185,29 @@ pipeline {
             if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
           )
 
-          rem Elegir comando (global, y si falla usar npx)
-          where appium >nul 2>&1
-          if %ERRORLEVEL% EQU 0 (
-            set "APPIUM_CMD=appium"
-            set "APPIUM_DOCTOR=appium-doctor"
-          ) else (
-            echo Usando npx para appium...
-            set "APPIUM_CMD=npx -y appium@latest"
-            set "APPIUM_DOCTOR=npx -y @appium/doctor"
-          )
-
           rem Doctor (no fallar si hay warnings)
-          cmd /c %APPIUM_DOCTOR% --android  || echo (appium-doctor devolvio warnings; continuo)
+          cmd /c appium-doctor --android  || echo (appium-doctor devolvio warnings; continuo)
 
-          rem Levantar Appium en background y esperar /status
-          start /B "" cmd /c "%APPIUM_CMD% -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
+          rem Levantar Appium y esperar /status
+          start /B "" cmd /c "appium -a %APPIUM_HOST% -p %APPIUM_PORT% --base-path %APPIUM_BASE_PATH% --log appium.log 1> appium.out 2>&1"
           powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; for($i=0;$i -lt 60;$i++){ try { iwr http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%/status -UseBasicParsing | Out-Null; exit 0 } catch {}; Start-Sleep 2 }; exit 1"
 
-          rem ---- Python virtualenv (sin tocar instalación del sistema) ----
-          set "PY_CMD=%SystemRoot%\\py.exe -3"
-          "%SystemRoot%\\py.exe" -3 -c "import sys" 1>nul 2>nul || set "PY_CMD=python"
-
-          %PY_CMD% -m venv .venv
-          if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
-          call .venv\\Scripts\\activate.bat
-
-          python -m pip install -U pip wheel
-          if exist requirements.txt (
-            pip install -r requirements.txt
+          rem ---- Python virtualenv (usar py.exe si existe) ----
+          set "PY_EXE=%SystemRoot%\\py.exe"
+          if exist "%PY_EXE%" (
+            "%PY_EXE%" -3 -m venv .venv
           ) else (
-            pip install behave allure-behave appium-python-client selenium
+            python -m venv .venv
+          )
+          if not exist ".venv\\Scripts\\activate.bat" ( echo ERROR: No se creo la venv & exit /b 1 )
+
+          set "VENV_PY=.venv\\Scripts\\python.exe"
+          call .venv\\Scripts\\activate.bat
+          "%VENV_PY%" -m pip install -U pip wheel
+          if exist requirements.txt (
+            "%VENV_PY%" -m pip install -r requirements.txt
+          ) else (
+            "%VENV_PY%" -m pip install behave allure-behave appium-python-client selenium
           )
         '''
       }
@@ -237,16 +217,12 @@ pipeline {
       steps {
         bat '''
           if not exist ".venv\\Scripts\\activate.bat" (
-            set "PY_CMD=%SystemRoot%\\py.exe -3"
-            "%SystemRoot%\\py.exe" -3 -c "import sys" 1>nul 2>nul || set "PY_CMD=python"
-            %PY_CMD% -m venv .venv
-            call .venv\\Scripts\\activate.bat
-            python -m pip install -U pip wheel
-            pip install behave allure-behave appium-python-client selenium
-          ) else (
-            call .venv\\Scripts\\activate.bat
+            set "PY_EXE=%SystemRoot%\\py.exe"
+            if exist "%PY_EXE%" ("%PY_EXE%" -3 -m venv .venv) else (python -m venv .venv)
           )
+          call .venv\\Scripts\\activate.bat
 
+          set "VENV_PY=.venv\\Scripts\\python.exe"
           if not exist "reports\\allure-results" mkdir "reports\\allure-results"
 
           set APPIUM_SERVER_URL=http://%APPIUM_HOST%:%APPIUM_PORT%%APPIUM_BASE_PATH%
@@ -256,9 +232,9 @@ pipeline {
           set TZ=%TZ%
 
           if not "%BEHAVE_TAGS%"=="" (
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results --tags "%BEHAVE_TAGS%"
+            "%VENV_PY%" -m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results --tags "%BEHAVE_TAGS%"
           ) else (
-            behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
+            "%VENV_PY%" -m behave -f allure_behave.formatter:AllureFormatter -o reports/allure-results
           )
         '''
       }
