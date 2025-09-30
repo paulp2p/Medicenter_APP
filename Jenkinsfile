@@ -18,7 +18,7 @@ pipeline {
     ANDROID_AVD_HOME = "${WORKSPACE}\\.android\\avd"
     AVD_NAME         = "ci-pixel5-api30"
     API_LEVEL        = "30"
-    SYSTEM_IMAGE     = "system-images;android-${API_LEVEL};google_apis;x86_64"
+    SYSTEM_IMAGE     = ""                         // se calcula en los stages (con %API_LEVEL%)
     DEVICE_PROFILE   = "pixel_5"
 
     // --- Appium / Node ---
@@ -37,7 +37,10 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
+
+    stage('Checkout') {
+      steps { checkout scm }
+    }
 
     stage('Verificar Java 17') {
       steps {
@@ -77,6 +80,9 @@ pipeline {
 
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
 
+          rem calcular SYSTEM_IMAGE con la API solicitada
+          set "SYSTEM_IMAGE=system-images;android-%API_LEVEL%;google_apis;x86_64"
+
           ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat --licenses
           ( for /L %%n in (1,1,400) do @echo y ) | sdkmanager.bat "platform-tools" "emulator" "platforms;android-%API_LEVEL%" "%SYSTEM_IMAGE%"
         '''
@@ -88,6 +94,9 @@ pipeline {
         bat '''
           set "JAVA_HOME=%JAVA17_HOME%"
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%ANDROID_SDK_ROOT%\\cmdline-tools\\latest\\bin;%PATH%"
+
+          rem recalcular SYSTEM_IMAGE aqui tambien
+          set "SYSTEM_IMAGE=system-images;android-%API_LEVEL%;google_apis;x86_64"
 
           for /f "tokens=*" %%A in ('avdmanager.bat list avd ^| findstr /C:"Name: %AVD_NAME%"') do set FOUND=1
           if not defined FOUND (
@@ -174,7 +183,7 @@ pipeline {
           set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
           set "PATH=%JAVA_HOME%\\bin;%ANDROID_SDK_ROOT%\\platform-tools;%ANDROID_SDK_ROOT%\\emulator;%PATH%"
 
-          rem --- Binarios globales de npm en PATH (cuenta del servicio Jenkins) ---
+          rem --- Binarios globales de npm ---
           set "NPM_PREFIX=%APPDATA%\\npm"
           if exist "%NPM_PREFIX%" set "PATH=%NPM_PREFIX%;%PATH%"
 
@@ -187,7 +196,7 @@ pipeline {
             if exist "%APPDATA%\\npm" set "PATH=%APPDATA%\\npm;%PATH%"
           )
 
-          rem --- Doctor (no fallar por warnings; 'android' tool ya no existe) ---
+          rem --- Doctor (no fallar por warnings) ---
           cmd /c appium-doctor --android  || echo (appium-doctor devolvio warnings; continuo)
 
           rem --- Levantar Appium y esperar /status ---
@@ -200,7 +209,6 @@ pipeline {
           set "PY_LOCAL=%PY_DIR%\\python.exe"
           set "PY_DL=%WORKSPACE%\\.tools\\py311.exe"
 
-          rem Si py.exe no tiene un 3.x visible para el usuario del servicio, usamos portable
           if exist "%PY_EXE%" (
             "%PY_EXE%" -3 -c "import sys" 1>nul 2>nul || set "USE_LOCAL=1"
           ) else (
@@ -217,7 +225,6 @@ pipeline {
               echo Instalando Python 3.11 portable en "%PY_DIR%"...
               start /wait "" "%PY_DL%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Include_pip=1 TargetDir="%PY_DIR%"
 
-              rem Espera hasta 180s a que aparezca python.exe (algunos instaladores spawnean msiexec)
               set /a __T=0
               :__WAIT_PY
               if exist "%PY_LOCAL%" goto __PY_OK
@@ -240,17 +247,13 @@ pipeline {
               powershell -NoProfile -Command "Expand-Archive -Force '%EMB_ZIP%' '%EMB_DIR%'"
               del "%EMB_ZIP%"
 
-              rem Habilitar 'import site' en el embebido
               powershell -NoProfile -Command "(Get-Content '%EMB_DIR%\\python311._pth') -replace '^(#\\s*)?import site','import site' | Set-Content '%EMB_DIR%\\python311._pth'"
 
               set "PYTHON_BOOT=%EMB_DIR%\\python.exe"
-
-              rem Bootstrap pip en el embebido
               curl -L -o "%WORKSPACE%\\.tools\\get-pip.py" https://bootstrap.pypa.io/get-pip.py
               "%PYTHON_BOOT%" "%WORKSPACE%\\.tools\\get-pip.py"
               del "%WORKSPACE%\\.tools\\get-pip.py"
 
-              rem Marcador para etapa de pruebas (sin venv)
               > py_mode.env echo PY_NO_VENV=1
             ) else (
               set "PYTHON_BOOT=%PY_LOCAL%"
@@ -306,7 +309,6 @@ pipeline {
             call .venv\\Scripts\\activate.bat
             set "RUNPY=python"
           ) else (
-            rem usar Python portable directo
             if exist "%WORKSPACE%\\.tools\\Python311\\python.exe" (
               set "RUNPY=%WORKSPACE%\\.tools\\Python311\\python.exe"
             ) else (
@@ -325,16 +327,17 @@ pipeline {
       }
     }
 
+  } // <-- cierre de stages
 
-    post {
-      always {
-        bat(returnStatus: true, script: """
-          if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
-          if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
-          if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
-          taskkill /F /IM node.exe /T 2>nul
-        """)
-        archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
-      }
+  post {
+    always {
+      bat(returnStatus: true, script: """
+        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" shell screencap -p /sdcard/final.png
+        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" pull /sdcard/final.png "reports\\final.png" 2>nul
+        if exist "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" "%ANDROID_SDK_ROOT%\\platform-tools\\adb.exe" emu kill 2>nul
+        taskkill /F /IM node.exe /T 2>nul
+      """)
+      archiveArtifacts artifacts: 'reports/**, appium.log, appium.out, emulator.log', fingerprint: true
     }
-
+  }
+}
